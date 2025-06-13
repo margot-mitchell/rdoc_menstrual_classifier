@@ -52,8 +52,9 @@ def test_classifier():
         logger.info("Loading data...")
         hormone_df = pd.read_csv('output/hormone_data_with_predictions.csv')
         labeled_df = pd.read_csv('output/full_hormone_data_labeled.csv')
+        pattern_df = pd.read_csv('output/menstrual_patterns.csv')
         
-        if hormone_df is None or labeled_df is None:
+        if hormone_df is None or labeled_df is None or pattern_df is None:
             raise ValueError("Failed to load data files")
         
         logger.info(f"Predicted data shape: {hormone_df.shape}")
@@ -97,6 +98,18 @@ def test_classifier():
             misclassified_df = hormone_df.iloc[valid_indices][misclassified_mask].copy()
             misclassified_df['true_phase'] = np.array(true_phases)[misclassified_mask]
             misclassified_df['predicted_phase'] = np.array(predicted_phases)[misclassified_mask]
+            
+            # Remove the 'phase' column
+            if 'phase' in misclassified_df.columns:
+                misclassified_df = misclassified_df.drop(columns=['phase'])
+            
+            # Add menstrual pattern for each subject
+            misclassified_df = misclassified_df.merge(
+                pattern_df[['subject_id', 'menstrual_pattern']],
+                on='subject_id',
+                how='left'
+            )
+            
             misclassified_df.to_csv('output/misclassified_samples.csv', index=False)
             logger.info(f"Saved {len(misclassified_df)} misclassified samples to output/misclassified_samples.csv")
         
