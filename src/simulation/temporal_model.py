@@ -16,6 +16,8 @@ class TemporalModel:
         self.period_data = {}
         # Store sample dates
         self.sample_dates = {}
+        # Store phase durations for each subject (using realistic distributions)
+        self.subject_phase_durations = {}
     
     def organize_data(self, hormone_df, period_df, survey_df):
         """Organize data from period_sleep_data and survey_responses."""
@@ -58,11 +60,48 @@ class TemporalModel:
         for subject_id in self.sample_dates:
             self.sample_dates[subject_id].sort()
         
+        # Generate realistic phase durations for each subject
+        self._generate_subject_phase_durations()
+        
         # Log data organization
         logger.info(f"Organized data for {len(self.survey_data)} subjects")
         logger.info(f"Survey data keys: {list(self.survey_data.keys())}")
         logger.info(f"Period data keys: {list(self.period_data.keys())}")
         logger.info(f"Sample dates keys: {list(self.sample_dates.keys())}")
+    
+    def _generate_subject_phase_durations(self):
+        """Generate realistic phase durations for each subject using the same distributions as simulation."""
+        # Import the phase configuration from simulation
+        from src.config.phase_config import generate_phase_durations
+        from src.simulation.subject import get_phase_duration_multiplier
+        
+        for subject_id in self.survey_data.keys():
+            # Get menstrual pattern to determine variability
+            pattern = self.survey_data[subject_id]['menstrual_pattern']
+            phase_duration_sd_multiplier = get_phase_duration_multiplier(pattern)
+            
+            # Generate realistic phase durations
+            phase_durations = generate_phase_durations(sd_multiplier=phase_duration_sd_multiplier)
+            
+            # Scale to match the subject's cycle length
+            cycle_length = self.survey_data[subject_id]['cycle_length']
+            original_total = sum(phase_durations.values())
+            scale_factor = cycle_length / original_total
+            
+            # Scale phase durations proportionally
+            adjusted_phase_durations = {}
+            for phase, duration in phase_durations.items():
+                adjusted_phase_durations[phase] = int(round(duration * scale_factor))
+            
+            # Ensure the total matches exactly by adjusting the largest phase
+            total_adjusted = sum(adjusted_phase_durations.values())
+            if total_adjusted != cycle_length:
+                largest_phase = max(adjusted_phase_durations.items(), key=lambda x: x[1])[0]
+                adjusted_phase_durations[largest_phase] += (cycle_length - total_adjusted)
+            
+            self.subject_phase_durations[subject_id] = adjusted_phase_durations
+            
+            logger.debug(f"Subject {subject_id} phase durations: {adjusted_phase_durations}")
     
     def train(self, hormone_df, period_df, survey_df):
         """
@@ -82,37 +121,36 @@ class TemporalModel:
         return {
             'survey': self.survey_data.get(subject_id, {}),
             'periods': self.period_data.get(subject_id, []),
-            'sample_dates': self.sample_dates.get(subject_id, [])
+            'sample_dates': self.sample_dates.get(subject_id, []),
+            'phase_durations': self.subject_phase_durations.get(subject_id, {})
         }
     
     def get_all_subjects(self):
         """Get list of all subject IDs."""
         return list(self.survey_data.keys())
     
-    def get_phase_from_cycle_day(self, cycle_day):
+    def get_phase_from_cycle_day(self, cycle_day, phase_durations):
         """
-        Map cycle day to detailed phase.
+        Map cycle day to detailed phase using realistic phase durations.
         
         Args:
-            cycle_day (int): Day of the menstrual cycle (1-28)
+            cycle_day (int): Day of the menstrual cycle
+            phase_durations (dict): Dictionary of phase durations for this subject
             
         Returns:
             str: Phase name (perimenstruation, mid_follicular, periovulation, early_luteal, mid_late_luteal)
         """
-        if 1 <= cycle_day <= 5:
-            return 'perimenstruation'
-        elif 6 <= cycle_day <= 11:
-            return 'mid_follicular'
-        elif 12 <= cycle_day <= 14:
-            return 'periovulation'
-        elif 15 <= cycle_day <= 21:
-            return 'early_luteal'
-        else:  # 22-28
-            return 'mid_late_luteal'
+        current_day = 0
+        for phase, duration in phase_durations.items():
+            current_day += duration
+            if cycle_day <= current_day:
+                return phase
+        return 'mid_late_luteal'  # Default to last phase if something goes wrong
     
     def predict_cycle_position(self, hormone_df):
         """
-        Predict cycle position for each sample using menstrual cycle length, date_of_last_period, and actual period data.
+        Predict cycle position for each sample using menstrual cycle length, date_of_last_period, 
+        actual period data, and realistic phase distributions.
         
         Args:
             hormone_df (pd.DataFrame): DataFrame containing hormone data with columns:
@@ -142,10 +180,12 @@ class TemporalModel:
             subject_data = hormone_df[hormone_df['subject_id'] == subject_id].copy()
             subject_data = subject_data.sort_values('date')
             
-            # Get subject's survey data
+            # Get subject's survey data and phase durations
             survey_info = self.survey_data.get(subject_id, {})
-            if not survey_info:
-                logger.warning(f"No survey data found for subject {subject_id}")
+            phase_durations = self.subject_phase_durations.get(subject_id, {})
+            
+            if not survey_info or not phase_durations:
+                logger.warning(f"No survey data or phase durations found for subject {subject_id}")
                 predictions.extend(['mid_follicular'] * len(subject_data))  # Default to mid_follicular
                 continue
             
@@ -163,7 +203,7 @@ class TemporalModel:
             for _, row in subject_data.iterrows():
                 sample_date = row['date']
                 
-                # Check if this sample date is a period day
+                # Check if this sample date is a period day - assign perimenstruation
                 if sample_date in period_dates:
                     predictions.append('perimenstruation')
                     continue
@@ -171,45 +211,12 @@ class TemporalModel:
                 # Calculate days since last period
                 days_since_period = (sample_date - date_of_last_period).days
                 
-                # Calculate cycle day (1-28)
+                # Calculate cycle day (1 to cycle_length)
                 cycle_day = (days_since_period % cycle_length) + 1
                 
-                # Count how many period days are in this cycle
-                cycle_start = date_of_last_period
-                cycle_end = cycle_start + pd.Timedelta(days=cycle_length)
-                cycle_period_days = [d for d in period_dates if cycle_start <= d < cycle_end]
-                num_period_days = len(cycle_period_days)
-                
-                # Calculate remaining days for other phases
-                remaining_days = cycle_length - num_period_days
-                
-                # Adjust phase boundaries to fit remaining days
-                # Original proportions: mid_follicular (6 days), periovulation (3 days), early_luteal (7 days), mid_late_luteal (7 days)
-                # Total original: 23 days, so we scale by remaining_days/23
-                scale_factor = remaining_days / 23.0
-                
-                mid_follicular_days = int(round(6 * scale_factor))
-                periovulation_days = int(round(3 * scale_factor))
-                early_luteal_days = int(round(7 * scale_factor))
-                mid_late_luteal_days = remaining_days - mid_follicular_days - periovulation_days - early_luteal_days
-                
-                # Adjust cycle day to account for period days
-                # Skip period days when calculating phase
-                adjusted_cycle_day = cycle_day
-                for period_date in cycle_period_days:
-                    if period_date < sample_date:
-                        adjusted_cycle_day -= 1
-                
-                # Map adjusted cycle day to phase
-                if adjusted_cycle_day <= mid_follicular_days:
-                    phase = 'mid_follicular'
-                elif adjusted_cycle_day <= mid_follicular_days + periovulation_days:
-                    phase = 'periovulation'
-                elif adjusted_cycle_day <= mid_follicular_days + periovulation_days + early_luteal_days:
-                    phase = 'early_luteal'
-                else:
-                    phase = 'mid_late_luteal'
-                
+                # Use the realistic phase durations to determine the phase
+                # This uses the same logic as the simulation data generation
+                phase = self.get_phase_from_cycle_day(cycle_day, phase_durations)
                 predictions.append(phase)
         
         return np.array(predictions) 
