@@ -4,9 +4,10 @@ from datetime import datetime
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
+import os
 
 # Define the phases
 PHASES = ['follicular', 'luteal']
@@ -86,6 +87,17 @@ def classify_all_subjects(df):
         
         # Add predictions to the result
         subject_data.loc[:, 'phase'] = preds
+        
+        # Add target phase if available in labeled data
+        subject_labeled = labeled_df[labeled_df['subject_id'] == subject_id]
+        if not subject_labeled.empty:
+            # Convert subphase to follicular/luteal
+            subject_data['target_phase'] = subject_data['date'].map(
+                lambda x: 'luteal' if subject_labeled[subject_labeled['date'] == x]['phase'].iloc[0] in ['early_luteal', 'mid_luteal'] 
+                else 'follicular' if subject_labeled[subject_labeled['date'] == x]['phase'].iloc[0] in ['follicular', 'periovulation']
+                else None
+            )
+        
         predictions.append(subject_data)
     
     # Combine all predictions
@@ -336,33 +348,30 @@ class MenstrualClassifier:
         print("\nDetailed Classification Report:")
         print(classification_report(y_true, y_pred, target_names=PHASES))
 
-def plot_feature_importance(classifier, feature_names, output_path='output/feature_importance.png'):
-    """Plot and save feature importance."""
-    # Get feature importance
-    importance = classifier.model.feature_importances_
+def plot_feature_importance(classifier, feature_names, output_path='output/rf/feature_importance.png'):
+    """
+    Plot and save feature importance.
     
-    # Create DataFrame for easier plotting
-    feature_importance = pd.DataFrame({
-        'feature': feature_names,
-        'importance': importance
-    })
+    Args:
+        classifier: Trained RandomForestClassifier instance
+        feature_names: List of feature names
+        output_path: Path to save the plot
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    # Sort by importance
-    feature_importance = feature_importance.sort_values('importance', ascending=False)
-
-    # Plot top 20 features
-    plt.figure(figsize=(15, 10))  # Increased figure size
-    sns.barplot(data=feature_importance.head(20), x='importance', y='feature')
-    plt.title('Top 20 Most Important Features')
-    plt.xlabel('Feature Importance')
-    plt.ylabel('Feature')
+    # Get feature importances
+    importances = classifier.feature_importances_
+    
+    # Sort features by importance
+    indices = np.argsort(importances)[::-1]
+    
+    # Plot
+    plt.figure(figsize=(12, 6))
+    plt.title('Feature Importance')
+    plt.bar(range(len(importances)), importances[indices])
+    plt.xticks(range(len(importances)), [feature_names[i] for i in indices], rotation=45, ha='right')
     plt.tight_layout()
-    
-    # Print the actual feature names and their importance
-    print("\nDetailed Feature Importance:")
-    for _, row in feature_importance.head(20).iterrows():
-        print(f"{row['feature']}: {row['importance']:.4f}")
-    
     plt.savefig(output_path)
     plt.close()
     print(f"Feature importance plot saved to {output_path}")
@@ -370,55 +379,58 @@ def plot_feature_importance(classifier, feature_names, output_path='output/featu
 def main():
     # Load the data
     hormone_df, period_df, survey_df, labeled_df = load_data()
-    
     if hormone_df is None or period_df is None or survey_df is None or labeled_df is None:
-        print("Failed to load data. Exiting.")
         return
     
-    try:
-        # Create target variable
-        filtered_df, y = create_target_variable(hormone_df, labeled_df)
-        
-        # Split data into train/test sets
-        X_train, X_test, y_train, y_test = train_test_split(
-            filtered_df, y, test_size=0.2, random_state=42, stratify=y
-        )
-        
-        # Initialize and train the classifier
-        classifier = MenstrualClassifier()
-        
-        # Train on training data
-        print("\nTraining on training set...")
-        classifier.train(X_train, period_df, survey_df, y_train)
-        
-        # Evaluate on test set
-        print("\nEvaluating on test set...")
-        classifier.evaluate(X_test, period_df, survey_df, y_test)
-        
-        # Make predictions on all data
-        print("\nMaking predictions on all data...")
-        predictions_df = classify_all_subjects(hormone_df)
-
+    # Create output directory
+    os.makedirs('output/rf', exist_ok=True)
+    
+    # Create target variable for training
+    X, y = create_target_variable(hormone_df, labeled_df)
+    
+    # Initialize and train the classifier
+    classifier = MenstrualClassifier()
+    classifier.train(hormone_df, period_df, survey_df, y)
+    
+    # Make predictions for all subjects
+    predictions_df = classify_all_subjects(hormone_df)
+    
     # Save predictions
-        predictions_df.to_csv('output/hormone_data_with_predictions.csv', index=False)
-        print("\nSaved predictions to output/hormone_data_with_predictions.csv")
-        
-        # Print and plot feature importance
-        print("\nFeature Importance:")
-        feature_importance = pd.DataFrame({
-            'feature': classifier.feature_columns,
-            'importance': classifier.model.feature_importances_
-        }).sort_values('importance', ascending=False)
-        print(feature_importance.head(10))
-        
-        # Plot feature importance
-        plot_feature_importance(classifier, classifier.feature_columns)
-        
-    except Exception as e:
-        print(f"Error during classification: {e}")
-        import traceback
-        print("Traceback:")
-        print(traceback.format_exc())
+    predictions_df.to_csv('output/rf/predictions.csv', index=False)
+    print("\nSaved predictions to output/rf/predictions.csv")
+    
+    # Plot feature importance
+    if hasattr(classifier.model, 'feature_importances_'):
+        plot_feature_importance(classifier.model, classifier.feature_columns)
+    
+    # Evaluate the model only on samples where we have target phases
+    if len(predictions_df) > 0 and 'target_phase' in predictions_df.columns:
+        eval_df = predictions_df.dropna(subset=['target_phase'])
+        if len(eval_df) > 0:
+            accuracy = accuracy_score(eval_df['target_phase'], eval_df['phase'])
+            print(f"\nOverall accuracy: {accuracy:.3f}")
+            
+            # Print classification report
+            print("\nClassification Report:")
+            print(classification_report(eval_df['target_phase'], eval_df['phase']))
+            
+            # Plot confusion matrix
+            cm = confusion_matrix(eval_df['target_phase'], eval_df['phase'])
+            plt.figure(figsize=(8, 6))
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                       xticklabels=['Follicular', 'Luteal'],
+                       yticklabels=['Follicular', 'Luteal'])
+            plt.title('Confusion Matrix (Random Forest)')
+            plt.ylabel('True Label')
+            plt.xlabel('Predicted Label')
+            plt.tight_layout()
+            plt.savefig('output/rf/confusion_matrix.png')
+            plt.close()
+            print("Confusion matrix plot saved to output/rf/confusion_matrix.png")
+        else:
+            print("\nNo samples with target phases available for evaluation")
+    else:
+        print("\nNo target phases available for evaluation")
 
 if __name__ == "__main__":
     main()

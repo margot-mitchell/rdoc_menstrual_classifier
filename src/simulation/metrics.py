@@ -22,9 +22,38 @@ def calculate_metrics(hormone_df):
         cycle_length = subject_data['cycle_day'].max()
         cycle_lengths.append(cycle_length)
     
-    # Calculate phase duration statistics
-    phase_durations = hormone_df.groupby(['subject_id', 'phase']).size().reset_index(name='duration')
-    phase_stats = phase_durations.groupby('phase')['duration'].agg(['mean', 'min', 'max'])
+    # Calculate phase duration statistics by counting continuous occurrences
+    phase_durations = []
+    for subject_id in hormone_df['subject_id'].unique():
+        subject_data = hormone_df[hormone_df['subject_id'] == subject_id].sort_values('date')
+        
+        # Group by phase and count continuous occurrences
+        current_phase = None
+        current_duration = 0
+        for _, row in subject_data.iterrows():
+            if row['phase'] == current_phase:
+                current_duration += 1
+            else:
+                if current_phase is not None:
+                    phase_durations.append({
+                        'subject_id': subject_id,
+                        'phase': current_phase,
+                        'duration': current_duration
+                    })
+                current_phase = row['phase']
+                current_duration = 1
+        
+        # Add the last phase duration
+        if current_phase is not None:
+            phase_durations.append({
+                'subject_id': subject_id,
+                'phase': current_phase,
+                'duration': current_duration
+            })
+    
+    # Convert to DataFrame and calculate statistics
+    phase_durations_df = pd.DataFrame(phase_durations)
+    phase_stats = phase_durations_df.groupby('phase')['duration'].agg(['mean', 'min', 'max'])
     
     # Create structured metrics dictionary
     metrics = {
@@ -67,7 +96,7 @@ def calculate_metrics(hormone_df):
         detailed_metrics['phases'][phase] = {
             'duration': {
                 'mean': float(phase_stats.loc[phase, 'mean']),
-                'std': float(phase_data.groupby('subject_id').size().std())
+                'std': float(phase_durations_df[phase_durations_df['phase'] == phase]['duration'].std())
             },
             'hormones': {
                 'estradiol': {},
