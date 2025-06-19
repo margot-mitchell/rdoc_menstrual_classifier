@@ -94,11 +94,8 @@ def main():
     
     # Train model on full sequences
     logger.info("Training temporal model...")
-    model.train(labeled_df)
-    
-    # Save trained model
-    model.save_model('output/temporal/model.pt')
-    logger.info("Saved trained model to output/temporal/model.pt")
+    model.train(labeled_df, period_df, survey_df)
+    logger.info("Temporal model training complete")
     
     # Make predictions for each subject
     all_predictions = []

@@ -535,10 +535,19 @@ def run_classification():
     # Plot confusion matrix
     plt.figure(figsize=(8, 6))
     cm = confusion_matrix(y_test, rf_predictions)
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    
+    # Get unique class labels in the order they appear
+    unique_labels = sorted(list(set(y_test.tolist() + rf_predictions.tolist())))
+    
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=unique_labels,
+                yticklabels=unique_labels)
     plt.title('Confusion Matrix - Random Forest')
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.tight_layout()
     plt.savefig('output/randomforest/confusion_matrix_RandomForest.png')
     plt.close()
     
@@ -639,10 +648,19 @@ def run_classification():
     # Plot confusion matrix
     plt.figure(figsize=(8, 6))
     cm = confusion_matrix(all_true_phases, all_predictions)
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    
+    # Get unique class labels in the order they appear
+    unique_labels = sorted(list(set(all_true_phases + all_predictions)))
+    
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=unique_labels,
+                yticklabels=unique_labels)
     plt.title('Confusion Matrix - Temporal Model')
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.tight_layout()
     plt.savefig('output/temporal/confusion_matrix_Temporal.png')
     plt.close()
     

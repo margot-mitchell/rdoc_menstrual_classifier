@@ -46,8 +46,10 @@ def check_survey_accuracy():
             logger.warning(f"Subject {subject_id}: No actual periods found in period data")
             continue
         
-        # Check if reported last period is within the period data range
-        reported_in_range = min_period_date <= reported_last_period <= max_period_date
+        # Check if reported last period is within THIS SUBJECT'S period data range
+        subject_min_date = subject_periods['date'].min()
+        subject_max_date = subject_periods['date'].max()
+        reported_in_range = subject_min_date <= reported_last_period <= subject_max_date
         
         # Check if reported last period matches any actual period (only if in range)
         period_match = False
@@ -127,7 +129,7 @@ def check_survey_accuracy():
     in_range_results = results_df[results_df['reported_in_range']]
     if len(in_range_results) > 0:
         period_matches = in_range_results['period_match'].sum()
-        logger.info(f"Period date accuracy (within range): {period_matches}/{len(in_range_results)} ({period_matches/len(in_range_results)*100:.1f}%)")
+        logger.info(f"Reported dates that match actual period days: {period_matches}/{len(in_range_results)} ({period_matches/len(in_range_results)*100:.1f}%)")
         
         # Days difference statistics (only for dates within range)
         valid_days_diff = in_range_results['days_diff'].dropna()
