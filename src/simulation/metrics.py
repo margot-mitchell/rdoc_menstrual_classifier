@@ -67,7 +67,7 @@ def calculate_metrics(hormone_df):
     }
     
     # Save basic metrics to JSON file
-    with open('output/basic_metrics.json', 'w') as f:
+    with open('outputs/basic_metrics.json', 'w') as f:
         json.dump(metrics, f)
     
     # Define phase day ranges

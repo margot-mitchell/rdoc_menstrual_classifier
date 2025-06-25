@@ -1,0 +1,39 @@
+# Prediction Configuration
+# Configuration for making predictions on unlabeled hormone data
+
+# Data settings
+data:
+  unlabeled_data_path: "outputs/data/hormone_data_unlabeled.csv"
+  period_data_path: "outputs/data/period_sleep_data.csv"
+  survey_data_path: "outputs/data/survey_responses.csv"
+  model_path: "outputs/models/random_forest_model.joblib"  # Path to trained model
+
+# Feature engineering (must match training configuration)
+features:
+  hormone_features: ["estradiol", "progesterone", "testosterone"]
+  normalize_features: true
+  add_interaction_features: true
+  add_ratio_features: true
+
+# Model parameters
+models:
+  temporal:
+    sequence_length: 70
+    use_as_prior: true  # Use prior features for prediction
+    prior_weight: 0.3
+
+# Output settings
+output:
+  predictions_dir: "outputs/predictions"
+  results_dir: "outputs/reports"
+  save_predictions: true
+  save_probabilities: true
+  generate_prediction_summary: true
+  save_prediction_plots: true
+
+# Prediction settings
+prediction:
+  include_confidence: true
+  confidence_threshold: 0.7
+  output_format: "csv"  # csv, json, or both
+  use_rule_based_prior: true 

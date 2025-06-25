@@ -1,0 +1,131 @@
+# Simulation Configuration
+# Configuration for hormone and period data simulation
+
+# General simulation parameters
+simulation:
+  n_subjects: 100
+  n_hormone_samples: 70
+  n_period_days: 150
+  random_seed: 42
+
+# Phase durations in days (mean, SD) from Gloe
+# Original proportions maintained but scaled to achieve ~28 day cycle
+phase_durations:
+  perimenstruation:
+    mean: 3.0  # ~10.7% of cycle
+    sd: 1.0    # Scaled proportionally
+  mid_follicular:
+    mean: 8.4  # ~30% of cycle
+    sd: 1.8    # Scaled proportionally
+  periovulation:
+    mean: 3.5  # ~12.5% of cycle
+    sd: 1.0    # Scaled proportionally
+  early_luteal:
+    mean: 4.8  # ~17.1% of cycle
+    sd: 2.0    # Scaled proportionally
+  mid_late_luteal:
+    mean: 8.3  # ~29.6% of cycle
+    sd: 3.0    # Scaled proportionally
+
+# Cycle length distribution (from Fehring)
+cycle_length:
+  mean: 28.9
+  sd: 2.5
+  min: 22
+  max: 36
+
+# Hormone distributions for simulation
+# Values from https://www.sciencedirect.com/science/article/pii/S0018506X23001198#f0020
+hormones:
+  estradiol:
+    perimenstruation:  # Days 1-5
+      min: 0.28
+      max: 2.64
+      mean: 1.28
+      sd: 0.54
+    mid_follicular:    # Days 6-11
+      min: 0.28
+      max: 2.64
+      mean: 1.28
+      sd: 0.54
+    periovulation:     # Days 12-14
+      min: 0.48
+      max: 4.3
+      mean: 2.0
+      sd: 0.76
+    early_luteal:      # Days 15-21
+      min: 0.3
+      max: 3.14
+      mean: 1.59
+      sd: 0.6
+    mid_late_luteal:   # Days 22-28
+      min: 0.3
+      max: 2.63
+      mean: 1.27
+      sd: 0.57
+  
+  progesterone:
+    perimenstruation:  # Days 1-5
+      min: 32.9
+      max: 312.53
+      mean: 119.96
+      sd: 66.45
+    mid_follicular:    # Days 6-11
+      min: 32.9
+      max: 312.53
+      mean: 119.96
+      sd: 66.45
+    periovulation:     # Days 12-14
+      min: 21.96
+      max: 351.74
+      mean: 149.78
+      sd: 85.98
+    early_luteal:      # Days 15-21
+      min: 63.35
+      max: 651.50
+      mean: 283.01
+      sd: 129.34
+    mid_late_luteal:   # Days 22-28
+      min: 15.76
+      max: 386.08
+      mean: 153.19
+      sd: 88.5
+  
+  testosterone:
+    perimenstruation:  # Days 1-5
+      min: 126.7
+      max: 146.5
+      mean: 136.57
+      sd: 78.0
+    mid_follicular:    # Days 6-11
+      min: 126.7
+      max: 146.5
+      mean: 136.57
+      sd: 78.0
+    periovulation:     # Days 12-14
+      min: 126.7
+      max: 146.5
+      mean: 136.57
+      sd: 78.0
+    early_luteal:      # Days 15-21
+      min: 126.7
+      max: 146.5
+      mean: 136.57
+      sd: 78.0
+    mid_late_luteal:   # Days 22-28
+      min: 126.7
+      max: 146.5
+      mean: 136.57
+      sd: 78.0
+
+# Output settings
+output:
+  data_dir: "outputs/data"
+  figures_dir: "outputs/figures"
+  reports_dir: "outputs/reports"
+  save_hormone_data: true
+  save_period_data: true
+  save_patterns: true
+  save_survey_data: true
+  plot_hormone_cycles: true
+  n_plot_subjects: 5 

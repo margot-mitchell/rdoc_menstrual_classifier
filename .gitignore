@@ -19,6 +19,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
 # Virtual Environment
 .env
@@ -26,22 +27,60 @@ wheels/
 env/
 venv/
 ENV/
+env.bak/
+venv.bak/
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
 
 # Jupyter Notebook
 .ipynb_checkpoints
+*.ipynb
 
 # Project specific
-output/
+outputs/
 *.log
 *.csv
 *.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
 *.json
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.hdf5
+*.parquet
+*.feather
+
+# Data files (common ML/data science)
+data/
+datasets/
+raw_data/
+processed_data/
+*.zip
+*.tar.gz
+*.rar
+
+# Model files
+models/
+*.pth
+*.pt
+*.onnx
+*.pb
+
+# Logs and temporary files
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
 
 # OS specific
 .DS_Store
@@ -50,4 +89,24 @@ output/
 .Spotlight-V100
 .Trashes
 ehthumbs.db
-Thumbs.db 
+Thumbs.db
+
+# Environment variables
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json 

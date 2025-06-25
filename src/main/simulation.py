@@ -1,12 +1,17 @@
+#!/usr/bin/env python3
+"""
+Main simulation script for generating hormone and period data.
+"""
+
 import os
 import sys
-import json
+import yaml
 import numpy as np
 import pandas as pd
 from datetime import timedelta
 
 # Add project root to Python path
-project_root = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 
 from src.simulation.subject import (
@@ -19,19 +24,28 @@ from src.simulation.hormones import generate_all_hormone_data
 from src.simulation.periods import generate_all_period_data
 from src.simulation.visualization import plot_hormone_cycles
 from src.simulation.metrics import calculate_metrics
+from src.utils.data_loader import load_config
 
-def simulate_hormone_and_period_data(n_subjects=100, n_hormone_samples=70, n_period_days=150):
+
+def simulate_hormone_and_period_data(config):
     """
     Simulate hormone and period data for multiple subjects.
     
     Args:
-        n_subjects (int): Number of subjects to simulate
-        n_hormone_samples (int): Number of days of hormone data to generate
-        n_period_days (int): Number of days of period data to generate
+        config (dict): Configuration dictionary loaded from YAML
         
     Returns:
         tuple: (hormone_data, period_data, menstrual_patterns, survey_data) DataFrames containing simulated data and patterns
     """
+    # Extract parameters from config
+    n_subjects = config['simulation']['n_subjects']
+    n_hormone_samples = config['simulation']['n_hormone_samples']
+    n_period_days = config['simulation']['n_period_days']
+    
+    # Set random seed if specified
+    if 'random_seed' in config['simulation']:
+        np.random.seed(config['simulation']['random_seed'])
+    
     # Generate subject patterns and start dates
     patterns = get_menstrual_patterns(n_subjects)
     start_dates = get_start_dates(n_subjects)
@@ -54,7 +68,12 @@ def simulate_hormone_and_period_data(n_subjects=100, n_hormone_samples=70, n_per
         )
         
         # Sample cycle length from distribution for NC women (from Fehring)
-        cycle_length = int(round(np.clip(np.random.normal(28.9, 2.5), 22, 36)))
+        cycle_config = config['cycle_length']
+        cycle_length = int(round(np.clip(
+            np.random.normal(cycle_config['mean'], cycle_config['sd']), 
+            cycle_config['min'], 
+            cycle_config['max']
+        )))
         
         # Scale the phase durations to match the cycle length while preserving proportions
         original_phase_durations = subject_params['phase_durations']
@@ -103,31 +122,18 @@ def simulate_hormone_and_period_data(n_subjects=100, n_hormone_samples=70, n_per
     
     return hormone_df, period_df, pattern_df, survey_df
 
-def main():
-    # Create output directory if it doesn't exist
-    os.makedirs('output', exist_ok=True)
+
+def generate_survey_responses(period_df, survey_df):
+    """
+    Generate survey responses using the survey data from simulation.
     
-    # Simulate data
-    hormone_df, period_df, pattern_df, survey_df = simulate_hormone_and_period_data()
-    
-    # Save data to CSV files
-    hormone_df.to_csv('output/full_hormone_data_labeled.csv', index=False)
-    
-    # Remove phase and cycle_day columns from period data
-    period_df = period_df.drop(columns=['phase', 'cycle_day'])
-    period_df.to_csv('output/period_sleep_data.csv', index=False)
-    
-    pattern_df.to_csv('output/menstrual_patterns.csv', index=False)
-    
-    # Create unlabeled hormone data (7 samples per subject)
-    # Remove cycle_day and phase from unlabeled data to force model to learn cycle position
-    unlabeled_df = pd.concat([
-        group.iloc[::10][:7].drop(columns=['cycle_day', 'phase'])  # Take every 10th sample, up to 7 samples
-        for _, group in hormone_df.groupby('subject_id', group_keys=False)
-    ])
-    unlabeled_df.to_csv('output/hormone_data_unlabeled.csv', index=False)
-    
-    # Generate survey responses using the survey data from simulation
+    Args:
+        period_df (pd.DataFrame): Period data
+        survey_df (pd.DataFrame): Survey data with basic info
+        
+    Returns:
+        pd.DataFrame: Survey responses with dates
+    """
     survey_data = []
     for _, survey_row in survey_df.iterrows():
         subject_id = survey_row['subject_id']
@@ -169,23 +175,67 @@ def main():
             'date_of_last_period': date_of_last_period.strftime('%Y-%m-%d')
         })
     
-    survey_df = pd.DataFrame(survey_data)
-    survey_df.to_csv('output/survey_responses.csv', index=False)
+    return pd.DataFrame(survey_data)
+
+
+def main():
+    """Main function to run the simulation."""
+    # Load configuration
+    config = load_config('config/simulation_config.yaml')
+    
+    # Create output directories
+    output_config = config['output']
+    os.makedirs(output_config['data_dir'], exist_ok=True)
+    os.makedirs(output_config['figures_dir'], exist_ok=True)
+    os.makedirs(output_config['reports_dir'], exist_ok=True)
+    
+    print("Starting hormone and period data simulation...")
+    
+    # Simulate data
+    hormone_df, period_df, pattern_df, survey_df = simulate_hormone_and_period_data(config)
+    
+    # Save data to CSV files
+    if output_config['save_hormone_data']:
+        hormone_df.to_csv(os.path.join(output_config['data_dir'], 'full_hormone_data_labeled.csv'), index=False)
+    
+    if output_config['save_period_data']:
+        # Remove phase and cycle_day columns from period data
+        period_df_clean = period_df.drop(columns=['phase', 'cycle_day'])
+        period_df_clean.to_csv(os.path.join(output_config['data_dir'], 'period_sleep_data.csv'), index=False)
+    
+    if output_config['save_patterns']:
+        pattern_df.to_csv(os.path.join(output_config['data_dir'], 'menstrual_patterns.csv'), index=False)
+    
+    # Create unlabeled hormone data (7 samples per subject)
+    # Remove cycle_day and phase from unlabeled data to force model to learn cycle position
+    unlabeled_df = pd.concat([
+        group.iloc[::10][:7].drop(columns=['cycle_day', 'phase'])  # Take every 10th sample, up to 7 samples
+        for _, group in hormone_df.groupby('subject_id', group_keys=False)
+    ])
+    unlabeled_df.to_csv(os.path.join(output_config['data_dir'], 'hormone_data_unlabeled.csv'), index=False)
+    
+    # Generate survey responses
+    if output_config['save_survey_data']:
+        survey_responses_df = generate_survey_responses(period_df, survey_df)
+        survey_responses_df.to_csv(os.path.join(output_config['data_dir'], 'survey_responses.csv'), index=False)
     
     # Calculate and save metrics
     metrics = calculate_metrics(hormone_df)
-    with open('output/simulated_metrics.txt', 'w') as f:
+    with open(os.path.join(output_config['reports_dir'], 'simulated_metrics.txt'), 'w') as f:
         f.write(metrics)
     
-    # Plot hormone cycles for first 5 subjects
-    for subject_id in range(5):
-        plot_hormone_cycles(
-            hormone_df,
-            subject_id=subject_id,
-            output_path=f'output/hormone_cycles_subject_{subject_id}.png'
-        )
+    # Plot hormone cycles
+    if output_config['plot_hormone_cycles']:
+        n_plot_subjects = output_config.get('n_plot_subjects', 5)
+        for subject_id in range(n_plot_subjects):
+            plot_hormone_cycles(
+                hormone_df,
+                subject_id=subject_id,
+                output_path=os.path.join(output_config['figures_dir'], f'hormone_cycles_subject_{subject_id}.png')
+            )
     
-    print("Data generation complete. Files saved in 'output' directory.")
+    print("Data generation complete. Files saved in output directories.")
+
 
 if __name__ == '__main__':
     main() 

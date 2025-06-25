@@ -1,0 +1,72 @@
+# Cross-Validation Configuration
+# Configuration for cross-validation experiments
+
+# Data settings
+data:
+  hormone_data_path: "outputs/data/full_hormone_data_labeled.csv"
+  survey_data_path: "outputs/data/survey_responses.csv"
+  test_size: 0.2
+  random_state: 42
+  n_samples_per_subject: 7
+
+# Feature engineering
+features:
+  hormone_features: ["estradiol", "progesterone", "testosterone"]
+  normalize_features: true
+  add_interaction_features: true
+  add_ratio_features: true
+
+# Model parameters
+models:
+  random_forest:
+    n_estimators: 100
+    max_depth: 10
+    min_samples_split: 5
+    min_samples_leaf: 2
+    random_state: 42
+
+  logistic_regression:
+    C: 1.0
+    max_iter: 1000
+    random_state: 42
+
+  support_vector_machine:
+    C: 1.0
+    kernel: "rbf"
+    gamma: "scale"
+    random_state: 42
+
+# Cross-validation settings
+cross_validation:
+  cv_folds: 5
+  cv_repeats: 3
+  test_size: 0.2
+  random_state: 42
+  stratified: true
+  scoring: "accuracy"
+
+# Model evaluation
+evaluation:
+  metrics:
+    - "accuracy"
+    - "precision"
+    - "recall"
+    - "f1"
+    - "roc_auc"
+  scoring: "accuracy"
+  n_jobs: -1
+
+# Data splitting
+data_splitting:
+  group_by: "subject_id"  # Group by subject to avoid data leakage
+  shuffle: true
+  random_state: 42
+
+# Output settings
+output:
+  results_dir: "outputs/reports"
+  figures_dir: "outputs/figures"
+  save_cv_results: true
+  save_best_model: true
+  generate_learning_curves: true
+  generate_validation_curves: true 
