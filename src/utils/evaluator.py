@@ -231,6 +231,22 @@ class ModelEvaluator:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
     
+    def _get_model_dir(self, model_name: str) -> str:
+        """
+        Get model-specific subdirectory path.
+        
+        Args:
+            model_name (str): Name of the model
+            
+        Returns:
+            str: Path to model-specific subdirectory
+        """
+        # Clean model name for directory name
+        clean_name = model_name.lower().replace(" ", "_").replace("-", "_")
+        model_dir = os.path.join(self.output_dir, clean_name)
+        os.makedirs(model_dir, exist_ok=True)
+        return model_dir
+    
     def evaluate(self, y_true: np.ndarray, y_pred: np.ndarray, 
                 model_name: str, X: Optional[pd.DataFrame] = None,
                 subject_ids: Optional[np.ndarray] = None,
@@ -268,9 +284,12 @@ class ModelEvaluator:
         else:
             metrics['roc_auc'] = np.nan
         
+        # Get model-specific directory
+        model_dir = self._get_model_dir(model_name)
+        
         # Save detailed classification report
         report = classification_report(y_true, y_pred, output_dict=True)
-        report_path = os.path.join(self.output_dir, f'{model_name.lower().replace(" ", "_")}_classification_report.txt')
+        report_path = os.path.join(model_dir, 'classification_report.txt')
         
         with open(report_path, 'w') as f:
             f.write(f"Classification Report for {model_name}\n")
@@ -304,7 +323,8 @@ class ModelEvaluator:
                 misclassified_data[col] = X.iloc[misclassified_mask][col].values
             
             misclassified_df = pd.DataFrame(misclassified_data)
-            output_path = os.path.join(self.output_dir, f'{model_name.lower().replace(" ", "_")}_misclassified_samples.csv')
+            model_dir = self._get_model_dir(model_name)
+            output_path = os.path.join(model_dir, 'misclassified_samples.csv')
             misclassified_df.to_csv(output_path, index=False)
     
     def plot_feature_importance(self, feature_importance: Dict[str, float], model_name: str) -> None:
@@ -325,7 +345,8 @@ class ModelEvaluator:
         plt.gca().invert_yaxis()
         
         # Save plot
-        output_path = os.path.join(self.output_dir, f'{model_name.lower().replace(" ", "_")}_feature_importance.png')
+        model_dir = self._get_model_dir(model_name)
+        output_path = os.path.join(model_dir, 'feature_importance.png')
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
     
@@ -342,7 +363,8 @@ class ModelEvaluator:
         plt.title(f'Confusion Matrix for {model_name}')
         
         # Save plot
-        output_path = os.path.join(self.output_dir, f'{model_name.lower().replace(" ", "_")}_confusion_matrix.png')
+        model_dir = self._get_model_dir(model_name)
+        output_path = os.path.join(model_dir, 'confusion_matrix.png')
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
     
@@ -364,7 +386,8 @@ class ModelEvaluator:
         plt.grid(True)
         
         # Save plot
-        output_path = os.path.join(self.output_dir, f'{model_name.lower().replace(" ", "_")}_roc_curve.png')
+        model_dir = self._get_model_dir(model_name)
+        output_path = os.path.join(model_dir, 'roc_curve.png')
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
     
@@ -384,7 +407,8 @@ class ModelEvaluator:
         plt.grid(True)
         
         # Save plot
-        output_path = os.path.join(self.output_dir, f'{model_name.lower().replace(" ", "_")}_precision_recall_curve.png')
+        model_dir = self._get_model_dir(model_name)
+        output_path = os.path.join(model_dir, 'precision_recall_curve.png')
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
     

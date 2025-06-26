@@ -6,7 +6,7 @@ data:
   unlabeled_data_path: "outputs/data/hormone_data_unlabeled.csv"
   period_data_path: "outputs/data/period_sleep_data.csv"
   survey_data_path: "outputs/data/survey_responses.csv"
-  model_path: "outputs/models/random_forest_model.joblib"  # Path to trained model
+  model_path: "outputs/models/random_forest_bundle.joblib"  # Path to trained model bundle
 
 # Feature engineering (must match training configuration)
 features:
@@ -17,10 +17,26 @@ features:
 
 # Model parameters
 models:
+  xgboost:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.1
+    subsample: 0.8
+    colsample_bytree: 0.8
+    random_state: 42
+  
+  lightgbm:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.1
+    subsample: 0.8
+    colsample_bytree: 0.8
+    random_state: 42
+  
   temporal:
     sequence_length: 70
     use_as_prior: true  # Use prior features for prediction
-    prior_weight: 0.3
+    prior_weight: 1
 
 # Output settings
 output:
@@ -30,6 +46,7 @@ output:
   save_probabilities: true
   generate_prediction_summary: true
   save_prediction_plots: true
+  models_dir: "outputs/models"
 
 # Prediction settings
 prediction:

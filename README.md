@@ -18,53 +18,56 @@ rdoc_menstrual_classifier/
 ├── src/
 │   ├── __init__.py             # Make src a package
 │   ├── main/
-│   │   ├── simulation.py       # Main simulation script
-│   │   ├── train_model.py      # Model training script
-│   │   ├── predict_model.py    # Prediction script
-│   │   └── cross_validation.py   # Main cross-validation script
+│   │   ├── simulation.py       # Generate synthetic hormone and period data
+│   │   ├── train_model.py      # Train all ML models on labeled data
+│   │   ├── predict_model.py    # Make predictions on unlabeled data
+│   │   ├── cross_validation.py # Evaluate models with cross-validation
+│   │   ├── temporal_predict.py # Rule-based predictions (no ML training)
+│   │   ├── compare_prior_weights.py # Compare prior weight performance
+│   │   └── classification.py   # Classifier implementations (library)
 │   │
 │   ├── utils/
 │   │   ├── __init__.py         # Make utils a package
-│   │   ├── data_loader.py      # Module for loading data
-│   │   ├── evaluator.py         # Module for model evaluation metrics
-│   │   └── model_utils.py       # Module for model saving/loading
+│   │   ├── data_loader.py      # Data loading and preprocessing
+│   │   ├── evaluator.py        # Model evaluation and metrics
+│   │   └── model_utils.py      # Model saving/loading utilities
 │   │
 │   ├── temporal_models/
 │   │   ├── __init__.py         # Make temporal_models a package
-│   │   ├── rule_based_prior.py # Rule-based prior model
-│   │   └── temporal_predict.py  # Temporal prediction script
+│   │   └── rule_based_prior.py # Rule-based prior model implementation
 │   │
 │   └── visualizations/
 │       ├── __init__.py         # Make visualizations a package
-│       ├── plotter.py          # Module for plotting
-│       └── report_generator.py  # Module for generating reports
+│       ├── plotter.py          # Plotting utilities
+│       └── report_generator.py # Report generation utilities
 │
 ├── tests/
 │   ├── __init__.py             # Make tests a package
 │   ├── test_simulation.py      # Tests for simulation functionality
-│   ├── test_classification.py   # Tests for classification functionality
-│   └── test_cross_validation.py  # Tests for cross-validation functionality
+│   ├── test_classification.py  # Tests for classification functionality
+│   └── test_cross_validation.py # Tests for cross-validation functionality
 │
 ├── outputs/
-│   ├── data/                   # Directory for storing data outputs
-│   ├── models/                 # Directory for storing trained models
-│   ├── predictions/            # Directory for storing predictions
-│   ├── figures/                # Directory for storing figures
-│   └── reports/                # Directory for storing reports
+│   ├── data/                   # Generated data files
+│   ├── models/                 # Trained model bundles
+│   ├── predictions/            # Prediction results (organized by model)
+│   ├── figures/                # Generated plots and visualizations
+│   └── reports/                # Evaluation reports (organized by model)
 │
 └── scripts/                    # Shell scripts for running the project
     ├── run_simulation.sh       # Shell script to run the simulation
-    ├── run_cross_validation.sh   # Shell script to run the cross-validation
+    ├── run_cross_validation.sh # Shell script to run the cross-validation
     └── run_tests.sh            # Shell script to run tests
 ```
 
 ## Features
 
 - **Data Simulation**: Generate realistic hormone and period data based on scientific literature
-- **Multiple Classifiers**: Support for Random Forest, Logistic Regression, SVM, and Temporal models
+- **Multiple Classifiers**: Support for Random Forest, Logistic Regression, SVM, XGBoost, and LightGBM
+- **Rule-Based Prior**: Temporal model using survey responses and period data
 - **Cross-Validation**: Comprehensive model evaluation with learning and validation curves
 - **Feature Engineering**: Automatic generation of interaction and ratio features
-- **Visualization**: Comprehensive plotting and report generation
+- **Organized Outputs**: Model-specific directories for predictions and reports
 - **Configuration Management**: YAML-based configuration for easy parameter tuning
 
 ## Installation
@@ -88,50 +91,6 @@ pip install -r requirements.txt
 
 ## Quick Start
 
-### Using Shell Scripts (Recommended)
-
-1. **Run Simulation**:
-```bash
-./scripts/run_simulation.sh
-```
-
-2. **Train Models**:
-```bash
-python src/main/train_model.py
-```
-
-3. **Make Predictions**:
-```bash
-python src/main/predict_model.py
-```
-
-4. **Run Cross-Validation**:
-```bash
-./scripts/run_cross_validation.sh
-```
-
-### Using Python Scripts Directly
-
-1. **Simulation**:
-```bash
-python src/main/simulation.py
-```
-
-2. **Train Models**:
-```bash
-python src/main/train_model.py
-```
-
-3. **Make Predictions**:
-```bash
-python src/main/predict_model.py
-```
-
-4. **Cross-Validation**:
-```bash
-python src/main/cross_validation.py
-```
-
 ### Complete Pipeline
 
 To run the entire pipeline from simulation to predictions:
@@ -145,7 +104,83 @@ python src/main/train_model.py
 
 # 3. Make predictions on unlabeled data
 python src/main/predict_model.py
+
+# 4. Run cross-validation (optional)
+python src/main/cross_validation.py
 ```
+
+### Individual Scripts
+
+1. **Simulation** (Generate test data):
+```bash
+python src/main/simulation.py
+```
+
+2. **Training** (Train all models):
+```bash
+python src/main/train_model.py
+```
+
+3. **Prediction** (Make predictions):
+```bash
+python src/main/predict_model.py
+```
+
+4. **Cross-Validation** (Evaluate models):
+```bash
+python src/main/cross_validation.py
+```
+
+5. **Temporal Prediction** (Rule-based, no training):
+```bash
+python src/main/temporal_predict.py
+```
+
+6. **Prior Weight Comparison** (Optimize prior weights):
+```bash
+python src/main/compare_prior_weights.py
+```
+
+## Script Functions and Outputs
+
+### `simulation.py`
+- **Purpose**: Generates synthetic hormone and period data for testing
+- **Outputs**: 
+  - `outputs/data/full_hormone_data_labeled.csv` (labeled training data)
+  - `outputs/data/hormone_data_unlabeled.csv` (unlabeled prediction data)
+  - `outputs/data/period_sleep_data.csv` (period tracking data)
+  - `outputs/data/survey_responses.csv` (survey responses)
+
+### `train_model.py`
+- **Purpose**: Trains all ML models (Random Forest, Logistic Regression, SVM, XGBoost, LightGBM)
+- **Outputs**:
+  - `outputs/models/*_bundle.joblib` (trained model bundles)
+  - `outputs/reports/model_name/` (model-specific evaluation results)
+  - `outputs/reports/training_results.csv` (overall training summary)
+
+### `predict_model.py`
+- **Purpose**: Makes predictions on unlabeled data using all trained models
+- **Outputs**:
+  - `outputs/predictions/model_name/` (model-specific predictions)
+  - `outputs/reports/combined_prediction_summary.json` (aggregated results)
+
+### `cross_validation.py`
+- **Purpose**: Evaluates model performance using cross-validation
+- **Outputs**:
+  - `outputs/reports/model_name/cross_validation_results.json`
+  - `outputs/reports/model_name/learning_curves.png`
+  - `outputs/reports/model_name/validation_curves.png`
+
+### `temporal_predict.py`
+- **Purpose**: Makes rule-based predictions using survey responses and period data
+- **Outputs**:
+  - `outputs/predictions/rule_based_predictions.csv`
+  - Rule-based prediction summaries
+
+### `compare_prior_weights.py`
+- **Purpose**: Compares model performance across different prior weights
+- **Outputs**:
+  - `outputs/reports/prior_weight_comparison/` (comparison plots and results)
 
 ## Configuration
 
@@ -157,25 +192,21 @@ The project uses YAML configuration files for easy parameter tuning:
 - Phase duration settings
 - Output settings
 
-### Classification Configuration (`config/classification_config.yaml`)
-- Model hyperparameters
+### Training Configuration (`config/training_config.yaml`)
+- Model hyperparameters for all classifiers
 - Feature engineering options
-- Cross-validation settings
+- Prior weight settings
 - Output preferences
+
+### Prediction Configuration (`config/prediction_config.yaml`)
+- Model selection for prediction
+- Prior weight settings
+- Output format preferences
 
 ### Cross-Validation Configuration (`config/cross_validation_config.yaml`)
 - CV folds and repeats
 - Evaluation metrics
 - Data splitting strategy
-
-## Data Simulation
-
-The simulation generates realistic menstrual cycle data based on scientific literature:
-
-- **Hormone Data**: Estradiol, progesterone, and testosterone levels across cycle phases
-- **Period Data**: Menstrual period tracking with realistic timing
-- **Survey Data**: Self-reported cycle information
-- **Pattern Classification**: Regular, irregular, and anovulatory patterns
 
 ## Classification Models
 
@@ -184,29 +215,35 @@ The project supports multiple classification approaches:
 1. **Random Forest**: Ensemble method with feature importance analysis
 2. **Logistic Regression**: Linear model with interpretable coefficients
 3. **Support Vector Machine**: Non-linear classification with kernel methods
-4. **Temporal Model**: Neural network for sequence-based classification
+4. **XGBoost**: Gradient boosting with advanced features
+5. **LightGBM**: Light gradient boosting machine
+6. **Rule-Based Prior**: Temporal model using survey and period data
 
-## Outputs
+## Output Organization
 
-The project generates comprehensive outputs:
+The project generates organized outputs with model-specific directories:
 
-### Data Files (`outputs/data/`)
-- `hormone_data_unlabeled.csv`: Hormone measurements for classification
-- `survey_responses.csv`: Self-reported cycle information
-- `period_sleep_data.csv`: Period tracking data
-- `menstrual_patterns.csv`: Ground truth pattern labels
+### Models (`outputs/models/`)
+- `*_bundle.joblib`: Complete model bundles (model + preprocessor + config)
 
-### Figures (`outputs/figures/`)
-- Hormone cycle plots
-- Model performance comparisons
-- Learning and validation curves
-- Feature importance visualizations
+### Predictions (`outputs/predictions/model_name/`)
+- `predictions.csv`: Predicted phases
+- `probabilities.csv`: Prediction probabilities
+- `summary.json`: Model-specific prediction summary
 
-### Reports (`outputs/reports/`)
-- HTML reports with comprehensive analysis
-- Model evaluation metrics
-- Cross-validation results
-- Classification reports
+### Reports (`outputs/reports/model_name/`)
+- `training_results.json`: Training metrics
+- `cross_validation_results.json`: CV results
+- `classification_report.txt`: Detailed classification report
+- `confusion_matrix.png`: Confusion matrix plot
+- `feature_importance.png`: Feature importance plot
+- `learning_curves.png`: Learning curves
+- `validation_curves.png`: Validation curves
+
+### Combined Results
+- `outputs/reports/combined_prediction_summary.json`: Aggregated results from all models
+- `outputs/reports/training_results.csv`: Overall training summary
+- `outputs/reports/cross_validation_results.csv`: Overall CV summary
 
 ## Testing
 
@@ -233,14 +270,14 @@ python -m pytest tests/test_cross_validation.py
 
 ### Adding New Features
 
-1. Modify the `DataProcessor` class in `src/utils/preprocessor.py`
+1. Modify the `DataPreprocessor` class in `src/utils/data_loader.py`
 2. Add feature engineering logic
 3. Update configuration files to include new feature options
 
 ### Custom Visualizations
 
-1. Add new plotting methods to `DataPlotter` class
-2. Update report generation in `ReportGenerator` class
+1. Add new plotting methods to the visualization modules
+2. Update report generation
 3. Modify configuration to enable new visualizations
 
 ## Dependencies
@@ -250,7 +287,8 @@ python -m pytest tests/test_cross_validation.py
 - **scikit-learn**: Machine learning algorithms
 - **matplotlib**: Plotting and visualization
 - **seaborn**: Statistical data visualization
-- **torch**: Deep learning (for temporal models)
+- **xgboost**: XGBoost gradient boosting
+- **lightgbm**: LightGBM gradient boosting
 - **pyyaml**: YAML configuration parsing
 - **joblib**: Model persistence
 - **scipy**: Scientific computing

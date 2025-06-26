@@ -64,7 +64,8 @@ def simulate_hormone_and_period_data(config):
             subject_id=subject_id,
             pattern=pattern,
             start_date=start_date,
-            phase_duration_sd_multiplier=phase_duration_sd_multiplier
+            phase_duration_sd_multiplier=phase_duration_sd_multiplier,
+            config_path='config/simulation_config.yaml'
         )
         
         # Sample cycle length from distribution for NC women (from Fehring)

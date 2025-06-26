@@ -5,9 +5,276 @@ Data loader utility module for loading configuration and data files.
 import os
 import yaml
 import pandas as pd
-from typing import Dict, Any, Tuple
+import numpy as np
+from typing import Dict, Any, Tuple, Optional
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+import joblib
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class DataPreprocessor:
+    """
+    Data preprocessor that handles consistent scaling and feature engineering between training and prediction.
+    Persists the scaler to ensure the same scaling is applied during prediction.
+    Handles hormone, interaction, ratio, prior, and categorical features.
+    """
+    
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """
+        Initialize the data preprocessor.
+        
+        Args:
+            config: Configuration dictionary (optional)
+        """
+        self.config = config or {}
+        self.scaler = None
+        self.feature_names = None
+        self.is_fitted = False
+        self.categorical_encoders = {}
+        self.use_prior = self.config.get('models', {}).get('temporal', {}).get('use_as_prior', False)
+        self.prior_config = self.config if self.use_prior else None
+        
+    def process_features(self, df: pd.DataFrame, add_prior: bool = False) -> pd.DataFrame:
+        """
+        Unified feature engineering pipeline.
+        Args:
+            df: Input DataFrame
+            add_prior: Whether to add prior features
+        Returns:
+            pd.DataFrame: Feature matrix
+        """
+        features_config = self.config.get('features', {})
+        hormone_features = features_config.get('hormone_features', ['estradiol', 'progesterone', 'testosterone'])
+        X = df[hormone_features].copy()
+        
+        # Add interaction features
+        if features_config.get('add_interaction_features', False):
+            for i, feat1 in enumerate(hormone_features):
+                for feat2 in hormone_features[i+1:]:
+                    interaction_name = f"{feat1}_{feat2}_interaction"
+                    X[interaction_name] = df[feat1] * df[feat2]
+        
+        # Add ratio features
+        if features_config.get('add_ratio_features', False):
+            for i, feat1 in enumerate(hormone_features):
+                for feat2 in hormone_features[i+1:]:
+                    ratio_name = f"{feat1}_{feat2}_ratio"
+                    X[ratio_name] = df[feat1] / (df[feat2] + 1e-8)
+        
+        # Add prior features if enabled
+        if add_prior and self.use_prior:
+            try:
+                from src.temporal_models.rule_based_prior import RuleBasedPrior
+                rule_prior = RuleBasedPrior(self.prior_config)
+                rule_prior.load_data()
+                prior_predictions = rule_prior.predict_phases(df)
+                X['prior_phase'] = prior_predictions
+                phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
+                prior_encoded = pd.get_dummies(X['prior_phase'], prefix='prior')
+                for phase in phases:
+                    col_name = f'prior_{phase}'
+                    if col_name not in prior_encoded.columns:
+                        prior_encoded[col_name] = 0
+                X = X.drop('prior_phase', axis=1)
+                X = pd.concat([X, prior_encoded], axis=1)
+                logger.info(f"Added {len(prior_encoded.columns)} prior features to the dataset")
+            except Exception as e:
+                logger.warning(f"Could not add prior features: {str(e)}")
+        
+        # Add any additional features (future-proofing)
+        # ...
+        return X
+    
+    def fit(self, df: pd.DataFrame, add_prior: bool = False) -> 'DataPreprocessor':
+        """
+        Fit the preprocessor on training data.
+        
+        Args:
+            df: Training DataFrame
+            add_prior: Whether to add prior features
+            
+        Returns:
+            self: Fitted preprocessor
+        """
+        X = self.process_features(df, add_prior=add_prior)
+        self.feature_names = list(X.columns)
+        X_processed = self._encode_categorical_variables(X, is_training=True)
+        self.scaler = StandardScaler()
+        self.scaler.fit(X_processed)
+        self.is_fitted = True
+        logger.info(f"Fitted preprocessor with {len(self.feature_names)} features")
+        return self
+    
+    def transform(self, df: pd.DataFrame, add_prior: bool = False) -> pd.DataFrame:
+        """
+        Transform data using fitted preprocessor.
+        
+        Args:
+            df: Feature matrix to transform
+            add_prior: Whether to add prior features
+            
+        Returns:
+            pd.DataFrame: Transformed feature matrix
+        """
+        if not self.is_fitted:
+            raise ValueError("Preprocessor must be fitted before transform")
+        
+        X = self.process_features(df, add_prior=add_prior)
+        X_aligned = self._align_features(X)
+        
+        # Validate feature alignment
+        self._validate_features(X_aligned)
+        
+        X_processed = self._encode_categorical_variables(X_aligned, is_training=False)
+        X_scaled = self.scaler.transform(X_processed)
+        return pd.DataFrame(X_scaled, columns=self.feature_names, index=X.index)
+    
+    def fit_transform(self, df: pd.DataFrame, add_prior: bool = False) -> pd.DataFrame:
+        """
+        Fit the preprocessor and transform the data.
+        
+        Args:
+            df: Feature matrix to fit and transform
+            add_prior: Whether to add prior features
+            
+        Returns:
+            pd.DataFrame: Transformed feature matrix
+        """
+        self.fit(df, add_prior=add_prior)
+        return self.transform(df, add_prior=add_prior)
+    
+    def _encode_categorical_variables(self, X: pd.DataFrame, is_training: bool) -> pd.DataFrame:
+        """
+        Encode categorical variables consistently.
+        
+        Args:
+            X: Feature matrix
+            is_training: Whether this is training data
+            
+        Returns:
+            pd.DataFrame: Feature matrix with encoded categorical variables
+        """
+        X_encoded = X.copy()
+        
+        for col in X.columns:
+            if X[col].dtype == 'object':
+                if is_training:
+                    # During training, create encoder and fit
+                    unique_values = X[col].unique()
+                    self.categorical_encoders[col] = {val: idx for idx, val in enumerate(unique_values)}
+                    X_encoded[col] = X[col].map(self.categorical_encoders[col])
+                else:
+                    # During prediction, use existing encoder
+                    if col in self.categorical_encoders:
+                        X_encoded[col] = X[col].map(self.categorical_encoders[col])
+                        # Fill unknown values with -1
+                        X_encoded[col] = X_encoded[col].fillna(-1)
+                    else:
+                        # If encoder doesn't exist, use simple encoding
+                        X_encoded[col] = pd.Categorical(X[col]).codes
+        
+        return X_encoded
+    
+    def _align_features(self, X: pd.DataFrame) -> pd.DataFrame:
+        """
+        Ensure X has the same features as training data.
+        
+        Args:
+            X: Feature matrix to align
+            
+        Returns:
+            pd.DataFrame: Aligned feature matrix
+        """
+        if self.feature_names is None:
+            raise ValueError("Preprocessor must be fitted before aligning features")
+        
+        # Create DataFrame with same columns as training
+        X_aligned = pd.DataFrame(0, index=X.index, columns=self.feature_names)
+        
+        # Copy existing columns
+        for col in X.columns:
+            if col in self.feature_names:
+                X_aligned[col] = X[col]
+        
+        return X_aligned
+    
+    def _validate_features(self, X: pd.DataFrame) -> None:
+        """
+        Validate that the feature matrix has the expected features.
+        
+        Args:
+            X: Feature matrix to validate
+            
+        Raises:
+            ValueError: If feature validation fails
+        """
+        if self.feature_names is None:
+            raise ValueError("Preprocessor must be fitted before validating features")
+        
+        # Check feature count
+        if X.shape[1] != len(self.feature_names):
+            from src.utils.model_utils import debug_feature_mismatch
+            debug_msg = debug_feature_mismatch(self.feature_names, list(X.columns), "DataPreprocessor")
+            raise ValueError(
+                f"Feature count mismatch: expected {len(self.feature_names)} features, "
+                f"got {X.shape[1]} features. {debug_msg}"
+            )
+        
+        # Check feature names
+        if list(X.columns) != self.feature_names:
+            from src.utils.model_utils import debug_feature_mismatch
+            debug_msg = debug_feature_mismatch(self.feature_names, list(X.columns), "DataPreprocessor")
+            raise ValueError(f"Feature mismatch detected: {debug_msg}")
+        
+        logger.info(f"Feature validation passed: {len(self.feature_names)} features aligned")
+    
+    def save(self, filepath: str) -> None:
+        """
+        Save the fitted preprocessor.
+        
+        Args:
+            filepath: Path to save the preprocessor
+        """
+        if not self.is_fitted:
+            raise ValueError("Preprocessor must be fitted before saving")
+        
+        preprocessor_data = {
+            'scaler': self.scaler,
+            'feature_names': self.feature_names,
+            'categorical_encoders': self.categorical_encoders,
+            'config': self.config,
+            'is_fitted': self.is_fitted
+        }
+        
+        joblib.dump(preprocessor_data, filepath)
+        logger.info(f"Saved preprocessor to {filepath}")
+    
+    def load(self, filepath: str) -> 'DataPreprocessor':
+        """
+        Load a fitted preprocessor.
+        
+        Args:
+            filepath: Path to the saved preprocessor
+            
+        Returns:
+            self: Loaded preprocessor
+        """
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Preprocessor file not found: {filepath}")
+        
+        preprocessor_data = joblib.load(filepath)
+        
+        self.scaler = preprocessor_data['scaler']
+        self.feature_names = preprocessor_data['feature_names']
+        self.categorical_encoders = preprocessor_data.get('categorical_encoders', {})
+        self.config = preprocessor_data.get('config', {})
+        self.is_fitted = preprocessor_data.get('is_fitted', True)
+        
+        logger.info(f"Loaded preprocessor from {filepath}")
+        return self
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -151,251 +418,90 @@ def load_and_split_data(file_path: str, test_size: float = 0.2, random_state: in
     
     data = pd.read_csv(file_path)
     
-    # Preprocess data
+    # Preprocess data using the new preprocessor
     X, y = preprocess_data(data)
     
     # Train-test split
     return train_test_split(X, y, test_size=test_size, random_state=random_state)
 
 
-def preprocess_data(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+def preprocess_data(data: pd.DataFrame, preprocessor: Optional[DataPreprocessor] = None) -> Tuple[pd.DataFrame, pd.Series]:
     """
-    Preprocess data for classification.
-    
+    Preprocess data for classification using the persistent preprocessor.
     Args:
         data (pd.DataFrame): Raw data with target column
-        
+        preprocessor (DataPreprocessor, optional): Fitted preprocessor for prediction
     Returns:
         tuple: (X, y) Feature matrix and target variable
     """
-    # Create a copy to avoid modifying original data
-    df = data.copy()
-    
-    # Handle missing values
-    df = df.dropna()
-    
-    # Separate features and target
-    # Assuming the target column is 'phase' or 'menstrual_pattern'
+    df = data.copy().dropna()
     target_columns = ['phase', 'menstrual_pattern', 'target']
-    target_col = None
-    
-    for col in target_columns:
-        if col in df.columns:
-            target_col = col
-            break
-    
+    target_col = next((col for col in target_columns if col in df.columns), None)
     if target_col is None:
         raise ValueError(f"No target column found. Expected one of: {target_columns}")
-    
-    # Extract target variable
     y = df[target_col]
-    
-    # Remove target and non-feature columns
-    feature_columns = [col for col in df.columns if col not in 
-                      target_columns + ['subject_id', 'date', 'cycle_day', 'cycle_position']]
-    
-    X = df[feature_columns]
-    
-    # Convert categorical variables to numeric
-    for col in X.columns:
-        if X[col].dtype == 'object':
-            X[col] = pd.Categorical(X[col]).codes
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    X = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
-    
-    return X, y
+    if preprocessor is not None and preprocessor.is_fitted:
+        X_processed = preprocessor.transform(df, add_prior=False)
+    else:
+        if preprocessor is None:
+            preprocessor = DataPreprocessor()
+        X_processed = preprocessor.fit_transform(df, add_prior=False)
+    return X_processed, y
 
 
-def preprocess_data_with_prior(data: pd.DataFrame, config: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.Series]:
+def preprocess_data_with_prior(data: pd.DataFrame, config: Dict[str, Any], preprocessor: Optional[DataPreprocessor] = None) -> Tuple[pd.DataFrame, pd.Series]:
     """
     Preprocess data for classification with rule-based prior as features.
-    
     Args:
         data (pd.DataFrame): Raw data with target column
         config (Dict[str, Any]): Configuration dictionary
-        
+        preprocessor (DataPreprocessor, optional): Fitted preprocessor for prediction
     Returns:
         tuple: (X, y) Feature matrix with prior features and target variable
     """
-    # Create a copy to avoid modifying original data
-    df = data.copy()
-    
-    # Handle missing values
-    df = df.dropna()
-    
-    # Separate features and target
+    df = data.copy().dropna()
     target_columns = ['phase', 'menstrual_pattern', 'target']
-    target_col = None
-    
-    for col in target_columns:
-        if col in df.columns:
-            target_col = col
-            break
-    
+    target_col = next((col for col in target_columns if col in df.columns), None)
     if target_col is None:
         raise ValueError(f"No target column found. Expected one of: {target_columns}")
-    
-    # Extract target variable
     y = df[target_col]
-    
-    # Remove target and non-feature columns
-    feature_columns = [col for col in df.columns if col not in 
-                      target_columns + ['subject_id', 'date', 'cycle_day', 'cycle_position']]
-    
-    X = df[feature_columns]
-    
-    # Add rule-based prior as features if enabled
-    if config.get('models', {}).get('temporal', {}).get('use_as_prior', False):
-        try:
-            from src.temporal_models.rule_based_prior import RuleBasedPrior
-            
-            # Initialize rule-based prior
-            rule_prior = RuleBasedPrior(config)
-            rule_prior.load_data()
-            
-            # Get prior predictions
-            prior_predictions = rule_prior.predict_phases(df)
-            
-            # Add prior predictions as a feature
-            X['prior_phase'] = prior_predictions
-            
-            # Convert prior phases to one-hot encoding
-            phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
-            prior_encoded = pd.get_dummies(X['prior_phase'], prefix='prior')
-            
-            # Ensure all phases are present (fill missing with 0)
-            for phase in phases:
-                col_name = f'prior_{phase}'
-                if col_name not in prior_encoded.columns:
-                    prior_encoded[col_name] = 0
-            
-            # Remove the original prior_phase column and add encoded features
-            X = X.drop('prior_phase', axis=1)
-            X = pd.concat([X, prior_encoded], axis=1)
-            
-            print(f"Added {len(prior_encoded.columns)} prior features to the dataset")
-            
-        except Exception as e:
-            print(f"Warning: Could not add prior features: {str(e)}")
-    
-    # Convert categorical variables to numeric
-    for col in X.columns:
-        if X[col].dtype == 'object':
-            X[col] = pd.Categorical(X[col]).codes
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    X = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
-    
-    return X, y
+    if preprocessor is not None and preprocessor.is_fitted:
+        X_processed = preprocessor.transform(df, add_prior=True)
+    else:
+        if preprocessor is None:
+            preprocessor = DataPreprocessor(config)
+        X_processed = preprocessor.fit_transform(df, add_prior=True)
+    return X_processed, y
 
 
-def preprocess_unlabeled_data(data: pd.DataFrame) -> pd.DataFrame:
+def preprocess_unlabeled_data(data: pd.DataFrame, preprocessor: DataPreprocessor) -> pd.DataFrame:
     """
-    Preprocess unlabeled data for prediction.
-    
+    Preprocess unlabeled data for prediction using a fitted preprocessor.
     Args:
         data (pd.DataFrame): Raw data without target column
-        
+        preprocessor (DataPreprocessor): Fitted preprocessor
     Returns:
         pd.DataFrame: Preprocessed feature matrix
     """
-    # Create a copy to avoid modifying original data
-    df = data.copy()
-    
-    # Handle missing values
-    df = df.dropna()
-    
-    # Remove non-feature columns
-    non_feature_columns = ['subject_id', 'date', 'cycle_day', 'cycle_position', 
-                          'phase', 'menstrual_pattern', 'target']
-    feature_columns = [col for col in df.columns if col not in non_feature_columns]
-    
-    X = df[feature_columns]
-    
-    # Convert categorical variables to numeric
-    for col in X.columns:
-        if X[col].dtype == 'object':
-            X[col] = pd.Categorical(X[col]).codes
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    X = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
-    
-    return X
+    if not preprocessor.is_fitted:
+        raise ValueError("Preprocessor must be fitted before preprocessing unlabeled data")
+    df = data.copy().dropna()
+    X_processed = preprocessor.transform(df, add_prior=False)
+    return X_processed
 
 
-def preprocess_unlabeled_data_with_prior(data: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
+def preprocess_unlabeled_data_with_prior(data: pd.DataFrame, config: Dict[str, Any], preprocessor: DataPreprocessor) -> pd.DataFrame:
     """
     Preprocess unlabeled data for prediction with rule-based prior as features.
-    
     Args:
         data (pd.DataFrame): Raw data without target column
         config (Dict[str, Any]): Configuration dictionary
-        
+        preprocessor (DataPreprocessor): Fitted preprocessor
     Returns:
         pd.DataFrame: Preprocessed feature matrix with prior features
     """
-    # Create a copy to avoid modifying original data
-    df = data.copy()
-    
-    # Handle missing values
-    df = df.dropna()
-    
-    # Remove non-feature columns
-    non_feature_columns = ['subject_id', 'date', 'cycle_day', 'cycle_position', 
-                          'phase', 'menstrual_pattern', 'target']
-    feature_columns = [col for col in df.columns if col not in non_feature_columns]
-    
-    X = df[feature_columns]
-    
-    # Add rule-based prior as features if enabled
-    if config.get('models', {}).get('temporal', {}).get('use_as_prior', False):
-        try:
-            from src.temporal_models.rule_based_prior import RuleBasedPrior
-            
-            # Initialize rule-based prior
-            rule_prior = RuleBasedPrior(config)
-            rule_prior.load_data()
-            
-            # Get prior predictions
-            prior_predictions = rule_prior.predict_phases(df)
-            
-            # Add prior predictions as a feature
-            X['prior_phase'] = prior_predictions
-            
-            # Convert prior phases to one-hot encoding
-            phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
-            prior_encoded = pd.get_dummies(X['prior_phase'], prefix='prior')
-            
-            # Ensure all phases are present (fill missing with 0)
-            for phase in phases:
-                col_name = f'prior_{phase}'
-                if col_name not in prior_encoded.columns:
-                    prior_encoded[col_name] = 0
-            
-            # Remove the original prior_phase column and add encoded features
-            X = X.drop('prior_phase', axis=1)
-            X = pd.concat([X, prior_encoded], axis=1)
-            
-            print(f"Added {len(prior_encoded.columns)} prior features to the dataset")
-            
-        except Exception as e:
-            print(f"Warning: Could not add prior features: {str(e)}")
-    
-    # Convert categorical variables to numeric
-    for col in X.columns:
-        if X[col].dtype == 'object':
-            X[col] = pd.Categorical(X[col]).codes
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    X = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
-    
-    return X 
+    if not preprocessor.is_fitted:
+        raise ValueError("Preprocessor must be fitted before preprocessing unlabeled data")
+    df = data.copy().dropna()
+    X_processed = preprocessor.transform(df, add_prior=True)
+    return X_processed 

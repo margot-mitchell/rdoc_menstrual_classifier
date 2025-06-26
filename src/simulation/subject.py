@@ -50,7 +50,7 @@ def get_phase_duration_multiplier(pattern):
     else:  # 'Regular (within 5-7 days)'
         return 1.0
 
-def initialize_subject(subject_id, pattern, start_date, phase_duration_sd_multiplier):
+def initialize_subject(subject_id, pattern, start_date, phase_duration_sd_multiplier, config_path='config/simulation_config.yaml'):
     """
     Initialize a subject with their basic parameters.
     
@@ -59,6 +59,7 @@ def initialize_subject(subject_id, pattern, start_date, phase_duration_sd_multip
         pattern (str): Menstrual pattern
         start_date (datetime): Start date
         phase_duration_sd_multiplier (float): Phase duration multiplier
+        config_path (str): Path to config file
         
     Returns:
         dict: Subject parameters
@@ -66,8 +67,8 @@ def initialize_subject(subject_id, pattern, start_date, phase_duration_sd_multip
     from src.config.hormone_config import sample_baseline_values
     from src.config.phase_config import generate_phase_durations
     
-    baselines = sample_baseline_values()
-    phase_durations = generate_phase_durations(sd_multiplier=phase_duration_sd_multiplier)
+    baselines = sample_baseline_values(config_path)
+    phase_durations = generate_phase_durations(sd_multiplier=phase_duration_sd_multiplier, config_path=config_path)
     total_cycle_length = sum(phase_durations.values())
     start_idx = np.random.randint(0, total_cycle_length)
     

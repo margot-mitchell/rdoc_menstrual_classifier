@@ -1,8 +1,28 @@
 import numpy as np
 from scipy.stats import lognorm
+import yaml
+import os
 
-# Hormone distributions for simulation (from https://www.sciencedirect.com/science/article/pii/S0018506X23001198#f0020)
-ESTRADIOL_DISTRIBUTIONS = {
+def load_hormone_distributions_from_config(config_path='config/simulation_config.yaml'):
+    """
+    Load hormone distributions from YAML config file.
+    
+    Args:
+        config_path (str): Path to the config file
+        
+    Returns:
+        dict: Hormone distributions dictionary
+    """
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    return config.get('hormones', {})
+
+# Fallback hardcoded values (only used if config file is missing)
+FALLBACK_ESTRADIOL_DISTRIBUTIONS = {
     'perimenstruation': {  # Days 1-5
         'min': 0.28,
         'max': 2.64,
@@ -35,7 +55,7 @@ ESTRADIOL_DISTRIBUTIONS = {
     }
 }
 
-PROGESTERONE_DISTRIBUTIONS = {
+FALLBACK_PROGESTERONE_DISTRIBUTIONS = {
     'perimenstruation': {  # Days 1-5
         'min': 32.9,
         'max': 312.53,
@@ -68,7 +88,7 @@ PROGESTERONE_DISTRIBUTIONS = {
     }
 }
 
-TESTOSTERONE_DISTRIBUTIONS = {
+FALLBACK_TESTOSTERONE_DISTRIBUTIONS = {
     'perimenstruation': {  # Days 1-5
         'min': 126.7,
         'max': 146.5,
@@ -122,50 +142,68 @@ def get_phase_from_cycle_day(cycle_day):
     else:  # 22-28
         return 'mid_late_luteal'
 
-def get_estradiol_distribution(phase=None, cycle_day=None):
+def get_estradiol_distribution(phase=None, cycle_day=None, config_path='config/simulation_config.yaml'):
     """
     Get the estradiol distribution parameters for the specified phase or cycle day.
     
     Args:
         phase (str): Phase name (optional)
         cycle_day (int): Day of the menstrual cycle (optional)
+        config_path (str): Path to config file
     
     Returns:
         dict: Distribution parameters including min, max, mean, and standard deviation
     """
     if cycle_day is not None:
         phase = get_phase_from_cycle_day(cycle_day)
-    return ESTRADIOL_DISTRIBUTIONS[phase]
+    
+    try:
+        hormone_distributions = load_hormone_distributions_from_config(config_path)
+        return hormone_distributions.get('estradiol', {}).get(phase, FALLBACK_ESTRADIOL_DISTRIBUTIONS[phase])
+    except (FileNotFoundError, KeyError):
+        return FALLBACK_ESTRADIOL_DISTRIBUTIONS[phase]
 
-def get_progesterone_distribution(phase=None, cycle_day=None):
+def get_progesterone_distribution(phase=None, cycle_day=None, config_path='config/simulation_config.yaml'):
     """
     Get the progesterone distribution parameters for the specified phase or cycle day.
     
     Args:
         phase (str): Phase name (optional)
         cycle_day (int): Day of the menstrual cycle (optional)
+        config_path (str): Path to config file
     
     Returns:
         dict: Distribution parameters including min, max, mean, and standard deviation
     """
     if cycle_day is not None:
         phase = get_phase_from_cycle_day(cycle_day)
-    return PROGESTERONE_DISTRIBUTIONS[phase]
+    
+    try:
+        hormone_distributions = load_hormone_distributions_from_config(config_path)
+        return hormone_distributions.get('progesterone', {}).get(phase, FALLBACK_PROGESTERONE_DISTRIBUTIONS[phase])
+    except (FileNotFoundError, KeyError):
+        return FALLBACK_PROGESTERONE_DISTRIBUTIONS[phase]
 
-def get_testosterone_distribution(phase=None, cycle_day=None):
+def get_testosterone_distribution(phase=None, cycle_day=None, config_path='config/simulation_config.yaml'):
     """
     Get the testosterone distribution parameters for the specified phase or cycle day.
     
     Args:
         phase (str): Phase name (optional)
         cycle_day (int): Day of the menstrual cycle (optional)
+        config_path (str): Path to config file
     
     Returns:
         dict: Distribution parameters including min, max, mean, and standard deviation
     """
     if cycle_day is not None:
         phase = get_phase_from_cycle_day(cycle_day)
-    return TESTOSTERONE_DISTRIBUTIONS[phase]
+    
+    try:
+        hormone_distributions = load_hormone_distributions_from_config(config_path)
+        return hormone_distributions.get('testosterone', {}).get(phase, FALLBACK_TESTOSTERONE_DISTRIBUTIONS[phase])
+    except (FileNotFoundError, KeyError):
+        return FALLBACK_TESTOSTERONE_DISTRIBUTIONS[phase]
 
 def sample_lognormal_from_distribution(dist_params):
     """
@@ -189,18 +227,29 @@ def sample_lognormal_from_distribution(dist_params):
     
     return value
 
-def sample_baseline_values():
+def sample_baseline_values(config_path='config/simulation_config.yaml'):
     """
     Sample baseline values for each hormone from the perimenstruation phase.
+    
+    Args:
+        config_path (str): Path to config file
     
     Returns:
         dict: Dictionary containing baseline values for estradiol, progesterone, and testosterone
     """
-    return {
-        'estradiol': sample_lognormal_from_distribution(ESTRADIOL_DISTRIBUTIONS['perimenstruation']),
-        'progesterone': sample_lognormal_from_distribution(PROGESTERONE_DISTRIBUTIONS['perimenstruation']),
-        'testosterone': sample_lognormal_from_distribution(TESTOSTERONE_DISTRIBUTIONS['perimenstruation'])
-    }
+    try:
+        hormone_distributions = load_hormone_distributions_from_config(config_path)
+        return {
+            'estradiol': sample_lognormal_from_distribution(hormone_distributions.get('estradiol', {}).get('perimenstruation', FALLBACK_ESTRADIOL_DISTRIBUTIONS['perimenstruation'])),
+            'progesterone': sample_lognormal_from_distribution(hormone_distributions.get('progesterone', {}).get('perimenstruation', FALLBACK_PROGESTERONE_DISTRIBUTIONS['perimenstruation'])),
+            'testosterone': sample_lognormal_from_distribution(hormone_distributions.get('testosterone', {}).get('perimenstruation', FALLBACK_TESTOSTERONE_DISTRIBUTIONS['perimenstruation']))
+        }
+    except (FileNotFoundError, KeyError):
+        return {
+            'estradiol': sample_lognormal_from_distribution(FALLBACK_ESTRADIOL_DISTRIBUTIONS['perimenstruation']),
+            'progesterone': sample_lognormal_from_distribution(FALLBACK_PROGESTERONE_DISTRIBUTIONS['perimenstruation']),
+            'testosterone': sample_lognormal_from_distribution(FALLBACK_TESTOSTERONE_DISTRIBUTIONS['perimenstruation'])
+        }
 
 def generate_progesterone_value(cycle_day, baseline):
     """

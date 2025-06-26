@@ -14,25 +14,46 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
+import json
 
 # Add project root to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(project_root)
 sys.path.append(os.path.join(project_root, 'src'))
 
-from src.utils.data_loader import load_config, preprocess_data_with_prior, preprocess_data
+from src.utils.data_loader import load_config, preprocess_data_with_prior, preprocess_data, DataPreprocessor
 from src.utils.evaluator import ModelEvaluator
-from src.utils.model_utils import save_model
+from src.utils.model_utils import save_model_bundle
 from src.temporal_models.rule_based_prior import RuleBasedPrior
 from src.main.classification import (
     RandomForestClassifier,
     LogisticRegressionClassifier,
-    SVMClassifier
+    SVMClassifier,
+    XGBoostClassifier,
+    LightGBMClassifier
 )
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def get_model_results_dir(results_dir: str, model_name: str) -> str:
+    """
+    Get model-specific results directory.
+    
+    Args:
+        results_dir (str): Base results directory
+        model_name (str): Name of the model
+        
+    Returns:
+        str: Path to model-specific results directory
+    """
+    # Clean model name for directory name
+    clean_name = model_name.lower().replace(" ", "_").replace("-", "_")
+    model_results_dir = os.path.join(results_dir, clean_name)
+    os.makedirs(model_results_dir, exist_ok=True)
+    return model_results_dir
 
 
 def train_models(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -56,13 +77,16 @@ def train_models(config: Dict[str, Any]) -> Dict[str, Any]:
     # Load raw data
     data = pd.read_csv(labeled_data_path)
     
+    # Create preprocessor
+    preprocessor = DataPreprocessor(config)
+    
     # Preprocess data with prior features if enabled
     if config.get('models', {}).get('temporal', {}).get('use_as_prior', False):
         logger.info("Using rule-based prior as features...")
-        X, y = preprocess_data_with_prior(data, config)
+        X, y = preprocess_data_with_prior(data, config, preprocessor)
     else:
         logger.info("Using standard preprocessing without prior...")
-        X, y = preprocess_data(data)
+        X, y = preprocess_data(data, preprocessor)
     
     # Split data
     X_train, X_test, y_train, y_test = train_test_split(
@@ -75,6 +99,11 @@ def train_models(config: Dict[str, Any]) -> Dict[str, Any]:
     logger.info(f"Test set size: {len(X_test)}")
     logger.info(f"Number of features: {len(X_train.columns)}")
     
+    # Save the fitted preprocessor
+    preprocessor_path = os.path.join(config['output']['models_dir'], 'data_preprocessor.joblib')
+    preprocessor.save(preprocessor_path)
+    logger.info(f"Saved fitted preprocessor to: {preprocessor_path}")
+    
     # Initialize evaluator
     evaluator = ModelEvaluator(config['output']['results_dir'])
     
@@ -82,7 +111,9 @@ def train_models(config: Dict[str, Any]) -> Dict[str, Any]:
     classifiers = {
         'random_forest': RandomForestClassifier(config),
         'logistic_regression': LogisticRegressionClassifier(config),
-        'svm': SVMClassifier(config)
+        'svm': SVMClassifier(config),
+        'xgb': XGBoostClassifier(config),
+        'lgbm': LightGBMClassifier(config)
     }
     
     # Train and evaluate each classifier
@@ -102,6 +133,28 @@ def train_models(config: Dict[str, Any]) -> Dict[str, Any]:
             metrics = evaluator.evaluate(y_test, y_pred, name, X_test)
             training_results[name] = metrics
             
+            # Get model-specific results directory
+            model_results_dir = get_model_results_dir(config['output']['results_dir'], name)
+            
+            # Save model-specific training results
+            model_results = {
+                'model_name': name,
+                'training_metrics': metrics,
+                'feature_names': list(X_train.columns),
+                'n_features': len(X_train.columns),
+                'n_classes': len(np.unique(y_train)),
+                'classes': list(np.unique(y_train)),
+                'training_date': pd.Timestamp.now().isoformat(),
+                'used_prior_features': config.get('models', {}).get('temporal', {}).get('use_as_prior', False),
+                'test_size': len(X_test),
+                'train_size': len(X_train)
+            }
+            
+            # Save model-specific results
+            model_results_path = os.path.join(model_results_dir, 'training_results.json')
+            with open(model_results_path, 'w') as f:
+                json.dump(model_results, f, indent=2, default=str)
+            
             # Save model with metadata
             metadata = {
                 'training_metrics': metrics,
@@ -111,14 +164,19 @@ def train_models(config: Dict[str, Any]) -> Dict[str, Any]:
                 'classes': list(np.unique(y_train)),
                 'training_date': pd.Timestamp.now().isoformat(),
                 'config': config,
-                'used_prior_features': config.get('models', {}).get('temporal', {}).get('use_as_prior', False)
+                'used_prior_features': config.get('models', {}).get('temporal', {}).get('use_as_prior', False),
+                'preprocessor_path': preprocessor_path
             }
             
-            model_path = save_model(
-                classifier.model, 
-                name, 
-                config['output']['models_dir'], 
-                metadata
+            model_path = save_model_bundle(
+                model=classifier.model,
+                preprocessor=preprocessor,
+                config=config,
+                training_metrics=metrics,
+                feature_names=list(X_train.columns),
+                model_name=name,
+                output_dir=config['output']['models_dir'],
+                label_encoder=getattr(classifier, 'label_encoder', None)
             )
             
             # Generate feature importance plot if available
@@ -133,6 +191,7 @@ def train_models(config: Dict[str, Any]) -> Dict[str, Any]:
             
             logger.info(f"{name} - Accuracy: {metrics['accuracy']:.4f}")
             logger.info(f"Model saved to: {model_path}")
+            logger.info(f"Model results saved to: {model_results_dir}")
             
         except Exception as e:
             logger.error(f"Error training {name}: {str(e)}")

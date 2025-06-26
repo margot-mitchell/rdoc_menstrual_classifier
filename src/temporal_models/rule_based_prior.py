@@ -4,12 +4,20 @@ Uses survey responses and backcounting/forwardcounting logic.
 """
 
 import os
+import sys
 import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime, timedelta
+import yaml
 
+# Add project root to Python path
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(project_root)
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +39,125 @@ class RuleBasedPrior:
         self.period_df = None
         self.sequence_length = config.get('models', {}).get('temporal', {}).get('sequence_length', 70)
         
+        self.phases = [
+            'perimenstruation',
+            'mid_follicular',
+            'periovulation',
+            'early_luteal',
+            'mid_late_luteal'
+        ]
+        # Load phase durations from simulation config
+        self.phase_durations_config = self._load_phase_durations()
+        self.phase_durations_by_subject = {}  # subject_id -> phase_durations dict
+        
+        # Calculate cumulative phase boundaries for each subject
+        self.phase_boundaries = {}
+        
+    def _load_phase_durations(self) -> Dict[str, Dict[str, float]]:
+        """
+        Load phase durations from simulation config.
+        
+        Returns:
+            Dict containing phase durations with mean and sd
+        """
+        try:
+            # Try to load from simulation config
+            sim_config_path = os.path.join(project_root, 'config', 'simulation_config.yaml')
+            with open(sim_config_path, 'r') as f:
+                sim_config = yaml.safe_load(f)
+            
+            phase_durations = sim_config.get('phase_durations', {})
+            logger.info(f"Loaded phase durations from simulation config: {phase_durations}")
+            return phase_durations
+            
+        except Exception as e:
+            logger.warning(f"Could not load phase durations from config: {e}")
+            # Fallback to default durations (28-day cycle)
+            default_durations = {
+                'perimenstruation': {'mean': 3.0, 'sd': 1.0},
+                'mid_follicular': {'mean': 8.4, 'sd': 1.8},
+                'periovulation': {'mean': 3.5, 'sd': 1.0},
+                'early_luteal': {'mean': 4.8, 'sd': 2.0},
+                'mid_late_luteal': {'mean': 8.3, 'sd': 3.0}
+            }
+            logger.info(f"Using default phase durations: {default_durations}")
+            return default_durations
+    
+    def get_subject_phase_durations(self, subject_id: int) -> Dict[str, int]:
+        """
+        Deterministically sample phase durations for a subject using subject_id as the seed.
+        Also applies menstrual pattern variability if available.
+        """
+        if subject_id not in self.phase_durations_by_subject:
+            np.random.seed(subject_id)
+            
+            # Get menstrual pattern if available
+            sd_multiplier = 1.0  # default
+            if self.survey_df is not None:
+                subject_survey = self.survey_df[self.survey_df['subject_id'] == subject_id]
+                if not subject_survey.empty:
+                    pattern = subject_survey.iloc[0].get('menstrual_pattern', 'Regular (within 5-7 days)')
+                    sd_multiplier = self._get_phase_duration_multiplier(pattern)
+            
+            phase_durations = {}
+            for phase, params in self.phase_durations_config.items():
+                # Apply the sd_multiplier to adjust variability based on menstrual pattern
+                duration = max(1, int(np.random.normal(params['mean'], params['sd'] * sd_multiplier)))
+                phase_durations[phase] = duration
+            self.phase_durations_by_subject[subject_id] = phase_durations
+            np.random.seed()  # Reset seed
+        return self.phase_durations_by_subject[subject_id]
+
+    def _get_phase_duration_multiplier(self, pattern: str) -> float:
+        """
+        Get phase duration variability multiplier based on menstrual pattern.
+        Same logic as in simulation.
+        
+        Args:
+            pattern (str): Menstrual pattern
+            
+        Returns:
+            float: Phase duration multiplier
+        """
+        if pattern == 'Extremely regular (no more than 1-2 days before or after expected)':
+            return 0.3
+        elif pattern == 'Very regular (within 3-4 days)':
+            return 0.6
+        else:  # 'Regular (within 5-7 days)' or any other pattern
+            return 1.0
+
+    def _calculate_phase_boundaries(self, cycle_length: float, subject_id: int = None) -> Dict[str, tuple]:
+        """
+        Calculate phase boundaries for a given cycle length using deterministic subject phase durations.
+        """
+        if subject_id is not None:
+            phase_durations = self.get_subject_phase_durations(subject_id)
+        else:
+            # fallback: sample once
+            np.random.seed(0)
+            phase_durations = {}
+            for phase, params in self.phase_durations_config.items():
+                duration = max(1, int(np.random.normal(params['mean'], params['sd'])))
+                phase_durations[phase] = duration
+            np.random.seed()
+        # Scale to match cycle_length
+        total = sum(phase_durations.values())
+        scale_factor = cycle_length / total
+        scaled = {phase: max(1, int(round(d * scale_factor))) for phase, d in phase_durations.items()}
+        # Adjust largest phase to match total
+        total_scaled = sum(scaled.values())
+        if total_scaled != cycle_length:
+            largest_phase = max(scaled.items(), key=lambda x: x[1])[0]
+            scaled[largest_phase] += (int(cycle_length) - total_scaled)
+        # Build boundaries
+        boundaries = {}
+        current_day = 1
+        for phase in self.phases:
+            duration = scaled[phase]
+            boundaries[phase] = (current_day, current_day + duration - 1)
+            current_day += duration
+        return boundaries
+    
     def load_data(self) -> None:
         """Load survey and period data."""
         data_config = self.config['data']
@@ -88,19 +215,14 @@ class RuleBasedPrior:
         # Calculate cycle day (1-28)
         cycle_day = (days_since_period % cycle_length) + 1
         
-        # Map cycle day to phase
-        return self._map_cycle_day_to_phase(cycle_day)
+        # Map cycle day to phase using realistic durations
+        return self._map_cycle_day_to_phase(cycle_day, cycle_length, subject_id)
     
     def predict_phase_from_period_data(self, subject_id: int, target_date: datetime) -> str:
         """
-        Predict phase using actual period data and forwardcounting.
-        
-        Args:
-            subject_id: Subject ID
-            target_date: Date to predict phase for
-            
-        Returns:
-            str: Predicted phase
+        Predict phase using actual period data.
+        Only assign perimenstruation if period == 'Yes'.
+        For all other days, use only non-perimenstruation phases for phase duration mapping.
         """
         if self.period_df is None:
             return 'unknown'
@@ -108,26 +230,38 @@ class RuleBasedPrior:
         # Get period data for this subject
         subject_periods = self.period_df[
             (self.period_df['subject_id'] == subject_id) & 
+            (self.period_df['date'] == target_date.strftime('%Y-%m-%d'))
+        ].copy()
+        
+        # If we have period data for this exact date, check if it's a period day
+        if not subject_periods.empty:
+            if subject_periods.iloc[0]['period'] == 'Yes':
+                return 'perimenstruation'
+        
+        # For non-period days, use phase durations to fill in the gaps, but never assign perimenstruation
+        # Get all period days for this subject
+        all_period_days = self.period_df[
+            (self.period_df['subject_id'] == subject_id) & 
             (self.period_df['period'] == 'Yes')
         ].copy()
         
-        if subject_periods.empty:
+        if all_period_days.empty:
             return 'unknown'
             
         # Sort by date
-        subject_periods = subject_periods.sort_values('date')
+        all_period_days = all_period_days.sort_values('date')
         
         # Find the most recent period before or on target date
-        recent_periods = subject_periods[subject_periods['date'] <= target_date]
+        recent_periods = all_period_days[all_period_days['date'] <= target_date]
         
         if recent_periods.empty:
             # If no periods before target date, use the first period and backcount
-            first_period = subject_periods.iloc[0]['date']
+            first_period = all_period_days.iloc[0]['date']
             days_before_first = (first_period - target_date).days
             
             # Estimate cycle length from available periods
-            if len(subject_periods) >= 2:
-                cycle_length = self._estimate_cycle_length(subject_periods)
+            if len(all_period_days) >= 2:
+                cycle_length = self._estimate_cycle_length(all_period_days)
             else:
                 cycle_length = 28  # Default
                 
@@ -136,22 +270,22 @@ class RuleBasedPrior:
             if estimated_cycle_day == 0:
                 estimated_cycle_day = cycle_length
                 
-            return self._map_cycle_day_to_phase(estimated_cycle_day)
+            return self._map_cycle_day_to_nonperi_phase(estimated_cycle_day, cycle_length, subject_id)
         else:
             # Use most recent period and forwardcount
             last_period = recent_periods.iloc[-1]['date']
             days_since_period = (target_date - last_period).days
             
             # Estimate cycle length
-            if len(subject_periods) >= 2:
-                cycle_length = self._estimate_cycle_length(subject_periods)
+            if len(all_period_days) >= 2:
+                cycle_length = self._estimate_cycle_length(all_period_days)
             else:
                 cycle_length = 28  # Default
                 
             # Calculate cycle day
             cycle_day = (days_since_period % cycle_length) + 1
             
-            return self._map_cycle_day_to_phase(cycle_day)
+            return self._map_cycle_day_to_nonperi_phase(cycle_day, cycle_length, subject_id)
     
     def _estimate_cycle_length(self, period_data: pd.DataFrame) -> float:
         """
@@ -181,26 +315,92 @@ class RuleBasedPrior:
             
         return np.mean(intervals)
     
-    def _map_cycle_day_to_phase(self, cycle_day: int) -> str:
+    def _map_cycle_day_to_phase(self, cycle_day: int, cycle_length: float = 28.0, subject_id: int = None) -> str:
         """
-        Map cycle day to menstrual phase.
+        Map cycle day to menstrual phase using realistic phase durations.
         
         Args:
-            cycle_day: Day of menstrual cycle (1-28)
+            cycle_day: Day of menstrual cycle (1 to cycle_length)
+            cycle_length: Length of the menstrual cycle in days
+            subject_id: Subject ID for individualization (optional)
             
         Returns:
             str: Phase name
         """
-        if cycle_day <= 5:
-            return 'perimenstruation'
-        elif 6 <= cycle_day <= 13:
-            return 'mid_follicular'
-        elif 14 <= cycle_day <= 16:
-            return 'periovulation'
-        elif 17 <= cycle_day <= 22:
-            return 'early_luteal'
-        else:  # 23-28
-            return 'mid_late_luteal'
+        # Calculate phase boundaries for this cycle length and subject
+        boundaries = self._calculate_phase_boundaries(cycle_length, subject_id)
+        
+        # Find which phase this cycle day belongs to
+        for phase, (start_day, end_day) in boundaries.items():
+            if start_day <= cycle_day <= end_day:
+                return phase
+        
+        # Fallback: if cycle day is outside calculated boundaries, use proportional mapping
+        return self._fallback_phase_mapping(cycle_day, cycle_length)
+    
+    def _fallback_phase_mapping(self, cycle_day: int, cycle_length: float) -> str:
+        """
+        Fallback phase mapping using proportional day ranges.
+        
+        Args:
+            cycle_day: Day of menstrual cycle
+            cycle_length: Length of the menstrual cycle in days
+            
+        Returns:
+            str: Phase name
+        """
+        # Calculate proportional boundaries based on mean durations
+        total_mean_duration = sum(self.phase_durations_config[phase]['mean'] for phase in self.phases)
+        
+        current_day = 1
+        for phase in self.phases:
+            if phase in self.phase_durations_config:
+                # Calculate proportional duration for this cycle length
+                mean_duration = self.phase_durations_config[phase]['mean']
+                proportional_duration = int((mean_duration / total_mean_duration) * cycle_length)
+                
+                start_day = current_day
+                end_day = current_day + proportional_duration - 1
+                
+                if start_day <= cycle_day <= end_day:
+                    return phase
+                
+                current_day += proportional_duration
+        
+        # If we get here, return the last phase
+        return self.phases[-1]
+    
+    def _map_cycle_day_to_nonperi_phase(self, cycle_day: int, cycle_length: float = 28.0, subject_id: int = None) -> str:
+        """
+        Map cycle day to menstrual phase using realistic phase durations, but never assign perimenstruation.
+        """
+        # Calculate phase boundaries for this cycle length and subject
+        boundaries = self._calculate_phase_boundaries(cycle_length, subject_id)
+        # Remove perimenstruation from boundaries
+        nonperi_boundaries = {phase: bounds for phase, bounds in boundaries.items() if phase != 'perimenstruation'}
+        # Find which phase this cycle day belongs to
+        for phase, (start_day, end_day) in nonperi_boundaries.items():
+            if start_day <= cycle_day <= end_day:
+                return phase
+        # Fallback: if cycle day is outside calculated boundaries, use proportional mapping (excluding perimenstruation)
+        return self._fallback_nonperi_phase_mapping(cycle_day, cycle_length)
+
+    def _fallback_nonperi_phase_mapping(self, cycle_day: int, cycle_length: float) -> str:
+        """
+        Fallback phase mapping using proportional day ranges, but never assign perimenstruation.
+        """
+        nonperi_phases = [phase for phase in self.phases if phase != 'perimenstruation']
+        total_mean_duration = sum(self.phase_durations_config[phase]['mean'] for phase in nonperi_phases)
+        current_day = 1
+        for phase in nonperi_phases:
+            mean_duration = self.phase_durations_config[phase]['mean']
+            proportional_duration = int((mean_duration / total_mean_duration) * cycle_length)
+            start_day = current_day
+            end_day = current_day + proportional_duration - 1
+            if start_day <= cycle_day <= end_day:
+                return phase
+            current_day += proportional_duration
+        return nonperi_phases[-1]
     
     def predict_phases(self, hormone_data: pd.DataFrame) -> np.ndarray:
         """

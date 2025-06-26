@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Tuple, Dict, Any
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 
 # Add the project root directory to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -105,7 +106,9 @@ class LogisticRegressionClassifier(BaseClassifier):
         self.model = LogisticRegression(
             C=lr_config['C'],
             max_iter=lr_config['max_iter'],
-            random_state=lr_config['random_state']
+            random_state=lr_config['random_state'],
+            solver=lr_config.get('solver', 'lbfgs'),
+            tol=lr_config.get('tol', 1e-6)
         )
         self.feature_names = None
     
@@ -135,7 +138,8 @@ class SVMClassifier(BaseClassifier):
             C=svm_config['C'],
             kernel=svm_config['kernel'],
             gamma=svm_config['gamma'],
-            random_state=svm_config['random_state']
+            random_state=svm_config['random_state'],
+            probability=True  # Enable probability estimates
         )
         self.feature_names = None
     
@@ -151,6 +155,100 @@ class SVMClassifier(BaseClassifier):
     def get_feature_importance(self) -> Dict[str, float]:
         """Get feature importance scores (not available for SVM)."""
         return {}
+
+
+class XGBoostClassifier(BaseClassifier):
+    """XGBoost classifier implementation with label encoding."""
+    
+    def __init__(self, config: Dict[str, Any]):
+        import xgboost as xgb
+        from sklearn.preprocessing import LabelEncoder
+        xgb_config = config['models']['xgboost']
+        self.model = xgb.XGBClassifier(
+            n_estimators=xgb_config['n_estimators'],
+            max_depth=xgb_config['max_depth'],
+            learning_rate=xgb_config['learning_rate'],
+            subsample=xgb_config['subsample'],
+            colsample_bytree=xgb_config['colsample_bytree'],
+            random_state=xgb_config['random_state'],
+            eval_metric='mlogloss',
+            use_label_encoder=False
+        )
+        self.feature_names = None
+        self.label_encoder = LabelEncoder()
+        self.is_fitted = False
+    
+    def train(self, X: pd.DataFrame, y: pd.Series) -> None:
+        """Train the XGBoost model with label encoding."""
+        self.feature_names = X.columns
+        y_encoded = self.label_encoder.fit_transform(y)
+        self.model.fit(X, y_encoded)
+        self.is_fitted = True
+    
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        """Make predictions using the trained model and decode labels."""
+        y_pred_encoded = self.model.predict(X)
+        if self.is_fitted:
+            return self.label_encoder.inverse_transform(y_pred_encoded)
+        return y_pred_encoded
+    
+    def get_feature_importance(self) -> Dict[str, float]:
+        """Get feature importance scores."""
+        if not hasattr(self.model, 'feature_importances_'):
+            return {}
+        return dict(zip(self.feature_names, self.model.feature_importances_))
+
+    def save_model(self, path: str) -> None:
+        """Save the trained model, feature names, and label encoder."""
+        import joblib
+        model_data = {
+            'model': self.model,
+            'feature_names': self.feature_names,
+            'label_encoder': self.label_encoder
+        }
+        joblib.dump(model_data, path)
+
+    def load_model(self, path: str) -> None:
+        """Load a trained model, feature names, and label encoder."""
+        import joblib
+        model_data = joblib.load(path)
+        self.model = model_data['model']
+        self.feature_names = model_data['feature_names']
+        self.label_encoder = model_data.get('label_encoder', None)
+        self.is_fitted = self.label_encoder is not None
+
+
+class LightGBMClassifier(BaseClassifier):
+    """LightGBM classifier implementation."""
+    
+    def __init__(self, config: Dict[str, Any]):
+        import lightgbm as lgb
+        lgb_config = config['models']['lightgbm']
+        self.model = lgb.LGBMClassifier(
+            n_estimators=lgb_config['n_estimators'],
+            max_depth=lgb_config['max_depth'],
+            learning_rate=lgb_config['learning_rate'],
+            subsample=lgb_config['subsample'],
+            colsample_bytree=lgb_config['colsample_bytree'],
+            random_state=lgb_config['random_state'],
+            verbose=-1
+        )
+        self.feature_names = None
+    
+    def train(self, X: pd.DataFrame, y: pd.Series) -> None:
+        """Train the LightGBM model."""
+        self.feature_names = X.columns
+        self.model.fit(X, y)
+    
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        """Make predictions using the trained model."""
+        return self.model.predict(X)
+    
+    def get_feature_importance(self) -> Dict[str, float]:
+        """Get feature importance scores."""
+        if not hasattr(self.model, 'feature_importances_'):
+            return {}
+        return dict(zip(self.feature_names, self.model.feature_importances_))
 
 
 class TemporalClassifier(BaseClassifier):
@@ -280,7 +378,9 @@ def run_classification(config: Dict[str, Any]):
     classifiers = {
         'Random Forest': RandomForestClassifier(config),
         'Logistic Regression': LogisticRegressionClassifier(config),
-        'SVM': SVMClassifier(config)
+        'SVM': SVMClassifier(config),
+        'XGBoost': XGBoostClassifier(config),
+        'LightGBM': LightGBMClassifier(config)
     }
     
     # Train and evaluate each classifier
