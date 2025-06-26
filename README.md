@@ -65,6 +65,7 @@ rdoc_menstrual_classifier/
 - **Data Simulation**: Generate realistic hormone and period data based on scientific literature
 - **Multiple Classifiers**: Support for Random Forest, Logistic Regression, SVM, XGBoost, and LightGBM
 - **Rule-Based Prior**: Temporal model using survey responses and period data
+- **Configurable Prior Testing**: Evaluate ML models, rule-based prior, or both, with flexible combination and reporting via config
 - **Cross-Validation**: Comprehensive model evaluation with learning and validation curves
 - **Feature Engineering**: Automatic generation of interaction and ratio features
 - **Organized Outputs**: Model-specific directories for predictions and reports
@@ -166,10 +167,14 @@ python src/main/compare_prior_weights.py
 
 ### `cross_validation.py`
 - **Purpose**: Evaluates model performance using cross-validation
+- **Configurable**: Supports ML-only, prior-only, or combined evaluation, controlled via `config/cross_validation_config.yaml`
 - **Outputs**:
   - `outputs/reports/model_name/cross_validation_results.json`
+  - `outputs/reports/model_name/prior_testing_results.json` (if prior testing enabled)
   - `outputs/reports/model_name/learning_curves.png`
   - `outputs/reports/model_name/validation_curves.png`
+  - `outputs/reports/cross_validation_results.csv` (summary)
+  - `outputs/reports/prior_testing_results.csv` (summary, if prior testing enabled)
 
 ### `temporal_predict.py`
 - **Purpose**: Makes rule-based predictions using survey responses and period data
@@ -185,6 +190,22 @@ python src/main/compare_prior_weights.py
 ## Configuration
 
 The project uses YAML configuration files for easy parameter tuning:
+
+### Cross-Validation & Prior Testing Configuration (`config/cross_validation_config.yaml`)
+
+Key options for prior testing:
+
+```yaml
+prior_testing:
+  enabled: true        # Set to false to run only pure ML cross-validation
+  test_both: true     # Set to true to run both ML-only and ML+prior evaluations
+  prior_weight: 0.3   # Weight for prior in combined predictions
+```
+- `enabled`: If true, runs prior testing in addition to ML models.
+- `test_both`: If true, runs both ML-only and ML+prior; if false, runs only prior testing.
+- `prior_weight`: Controls the influence of the prior in combined predictions (0.0 = ML only, 1.0 = prior only).
+
+Other config options remain as before (see file for details).
 
 ### Simulation Configuration (`config/simulation_config.yaml`)
 - Number of subjects and samples
@@ -202,11 +223,6 @@ The project uses YAML configuration files for easy parameter tuning:
 - Model selection for prediction
 - Prior weight settings
 - Output format preferences
-
-### Cross-Validation Configuration (`config/cross_validation_config.yaml`)
-- CV folds and repeats
-- Evaluation metrics
-- Data splitting strategy
 
 ## Classification Models
 
