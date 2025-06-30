@@ -1,144 +1,100 @@
 import numpy as np
 import pandas as pd
+import yaml
+import os
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple, Optional
 import logging
-from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 
 class TemporalModel:
-    """Temporal model for organizing menstrual cycle data."""
-    def __init__(self):
-        # Store data organized by subject_id
-        self.subject_data = {}
-        # Store survey responses
-        self.survey_data = {}
-        # Store period data
-        self.period_data = {}
-        # Store sample dates
-        self.sample_dates = {}
-        # Store phase durations for each subject (using realistic distributions)
-        self.subject_phase_durations = {}
+    """
+    A temporal model for generating hormone data based on menstrual cycle phases.
+    """
     
-    def organize_data(self, hormone_df, period_df, survey_df):
-        """Organize data from period_sleep_data and survey_responses."""
-        # Convert dates to datetime
-        period_df['date'] = pd.to_datetime(period_df['date'])
-        hormone_df['date'] = pd.to_datetime(hormone_df['date'])
-        
-        # Organize survey data
-        for _, row in survey_df.iterrows():
-            subject_id = row['subject_id']
-            self.survey_data[subject_id] = {
-                'cycle_length': row['cycle_length'],
-                'menstrual_pattern': row['menstrual_pattern'],
-                'date_of_response': pd.to_datetime(row['date_of_response']),
-                'date_of_last_period': pd.to_datetime(row['date_of_last_period'])
-            }
-        
-        # Organize period data - only store date and period status
-        for _, row in period_df.iterrows():
-            subject_id = row['subject_id']
-            if subject_id not in self.period_data:
-                self.period_data[subject_id] = []
-            
-            self.period_data[subject_id].append({
-                'date': row['date'],
-                'period': row['period']
-            })
-        
-        # Organize sample dates
-        for _, row in hormone_df.iterrows():
-            subject_id = row['subject_id']
-            if subject_id not in self.sample_dates:
-                self.sample_dates[subject_id] = []
-            
-            self.sample_dates[subject_id].append(row['date'])
-        
-        # Sort dates for each subject
-        for subject_id in self.period_data:
-            self.period_data[subject_id].sort(key=lambda x: x['date'])
-        for subject_id in self.sample_dates:
-            self.sample_dates[subject_id].sort()
-        
-        # Generate realistic phase durations for each subject
-        self._generate_subject_phase_durations()
-        
-        # Log data organization
-        logger.info(f"Organized data for {len(self.survey_data)} subjects")
-        logger.info(f"Survey data keys: {list(self.survey_data.keys())}")
-        logger.info(f"Period data keys: {list(self.period_data.keys())}")
-        logger.info(f"Sample dates keys: {list(self.sample_dates.keys())}")
-    
-    def _generate_subject_phase_durations(self):
-        """Generate realistic phase durations for each subject using the same distributions as simulation."""
-        # Import the phase configuration from simulation
-        from src.config.phase_config import generate_phase_durations
-        from src.simulation.subject import get_phase_duration_multiplier
-        
-        for subject_id in self.survey_data.keys():
-            # Get menstrual pattern to determine variability
-            pattern = self.survey_data[subject_id]['menstrual_pattern']
-            phase_duration_sd_multiplier = get_phase_duration_multiplier(pattern)
-            
-            # Generate realistic phase durations
-            phase_durations = generate_phase_durations(sd_multiplier=phase_duration_sd_multiplier)
-            
-            # Scale to match the subject's cycle length
-            cycle_length = self.survey_data[subject_id]['cycle_length']
-            original_total = sum(phase_durations.values())
-            scale_factor = cycle_length / original_total
-            
-            # Scale phase durations proportionally
-            adjusted_phase_durations = {}
-            for phase, duration in phase_durations.items():
-                adjusted_phase_durations[phase] = int(round(duration * scale_factor))
-            
-            # Ensure the total matches exactly by adjusting the largest phase
-            total_adjusted = sum(adjusted_phase_durations.values())
-            if total_adjusted != cycle_length:
-                largest_phase = max(adjusted_phase_durations.items(), key=lambda x: x[1])[0]
-                adjusted_phase_durations[largest_phase] += (cycle_length - total_adjusted)
-            
-            self.subject_phase_durations[subject_id] = adjusted_phase_durations
-            
-            logger.debug(f"Subject {subject_id} phase durations: {adjusted_phase_durations}")
-    
-    def train(self, hormone_df, period_df, survey_df):
+    def __init__(self, config_path='config/simulation_config.yaml'):
         """
-        Organize the data for the rule-based temporal model.
+        Initialize the temporal model.
         
         Args:
-            hormone_df (pd.DataFrame): DataFrame containing hormone data
-            period_df (pd.DataFrame): DataFrame containing period data
-            survey_df (pd.DataFrame): DataFrame containing survey responses
+            config_path (str): Path to the configuration file
         """
-        logger.info("Organizing data for temporal model...")
-        self.organize_data(hormone_df, period_df, survey_df)
-        logger.info("Temporal model data organization complete")
+        self.config_path = config_path
+        self.config = self._load_config()
+        self.phase_duration_sd_multiplier = self.config.get('phase_duration_sd_multiplier', 1.0)
+        
+        # Phase durations for each subject (will be generated per subject)
+        self.subject_phase_durations = {}
+        
+        # Load hormone distributions
+        self.hormone_distributions = self.config.get('hormones', {})
+        
+        # Define the phases in order
+        self.phases = [
+            'perimenstruation',
+            'mid_follicular', 
+            'periovulation',
+            'early_luteal',
+            'mid_late_luteal'
+        ]
+        
+        # Generate phase durations for all subjects
+        self._generate_subject_phase_durations()
     
-    def get_subject_data(self, subject_id):
-        """Get all data for a specific subject."""
-        return {
-            'survey': self.survey_data.get(subject_id, {}),
-            'periods': self.period_data.get(subject_id, []),
-            'sample_dates': self.sample_dates.get(subject_id, []),
-            'phase_durations': self.subject_phase_durations.get(subject_id, {})
-        }
+    def _load_config(self) -> dict:
+        """Load configuration from YAML file."""
+        if not os.path.exists(self.config_path):
+            raise FileNotFoundError(f"Config file not found: {self.config_path}")
+        
+        with open(self.config_path, 'r') as f:
+            return yaml.safe_load(f)
     
-    def get_all_subjects(self):
-        """Get list of all subject IDs."""
-        return list(self.survey_data.keys())
+    def _generate_subject_phase_durations(self):
+        """Generate phase durations for all subjects."""
+        from src.simulation.utils import generate_phase_durations
+        
+        # Generate base phase durations
+        phase_durations = generate_phase_durations(sd_multiplier=self.phase_duration_sd_multiplier)
+        
+        # Store the base phase durations (will be scaled per subject)
+        self.base_phase_durations = phase_durations.copy()
+        
+        # Calculate the total duration of the base cycle
+        original_total = sum(phase_durations.values())
+        
+        # Scale phase durations to match the target cycle length (28 days)
+        target_cycle_length = 28
+        scale_factor = target_cycle_length / original_total
+        
+        # Scale phase durations proportionally
+        adjusted_phase_durations = {}
+        for phase, duration in phase_durations.items():
+            adjusted_phase_durations[phase] = int(round(duration * scale_factor))
+        
+        # Ensure the total matches exactly by adjusting the largest phase
+        total_adjusted = sum(adjusted_phase_durations.values())
+        if total_adjusted != target_cycle_length:
+            # Find the phase with the largest duration and adjust it
+            largest_phase = max(adjusted_phase_durations.items(), key=lambda x: x[1])[0]
+            adjusted_phase_durations[largest_phase] += (target_cycle_length - total_adjusted)
+        
+        # Store the adjusted phase durations
+        self.phase_durations = adjusted_phase_durations
+        
+        logger.info(f"Generated phase durations: {self.phase_durations}")
+        logger.info(f"Total cycle length: {sum(self.phase_durations.values())}")
     
     def get_phase_from_cycle_day(self, cycle_day, phase_durations):
         """
-        Map cycle day to detailed phase using realistic phase durations.
+        Determine the menstrual cycle phase based on cycle day and phase durations.
         
         Args:
             cycle_day (int): Day of the menstrual cycle
-            phase_durations (dict): Dictionary of phase durations for this subject
-            
+            phase_durations (dict): Dictionary of phase durations
+        
         Returns:
-            str: Phase name (perimenstruation, mid_follicular, periovulation, early_luteal, mid_late_luteal)
+            str: Phase name
         """
         current_day = 0
         for phase, duration in phase_durations.items():
@@ -147,76 +103,98 @@ class TemporalModel:
                 return phase
         return 'mid_late_luteal'  # Default to last phase if something goes wrong
     
-    def predict_cycle_position(self, hormone_df):
+    def get_hormone_value(self, hormone_name: str, phase: str, cycle_day: int) -> float:
         """
-        Predict cycle position for each sample using menstrual cycle length, date_of_last_period, 
-        actual period data, and realistic phase distributions.
+        Get hormone value for a specific phase and cycle day.
         
         Args:
-            hormone_df (pd.DataFrame): DataFrame containing hormone data with columns:
-                - subject_id
-                - date
-                - estradiol
-                - progesterone
-                - testosterone
-        
+            hormone_name (str): Name of the hormone ('estradiol', 'progesterone', 'testosterone')
+            phase (str): Current menstrual cycle phase
+            cycle_day (int): Day of the menstrual cycle
+            
         Returns:
-            np.ndarray: Array of predicted phases for each sample
+            float: Hormone value
         """
-        # Convert dates to datetime if they aren't already
-        hormone_df = hormone_df.copy()
-        hormone_df['date'] = pd.to_datetime(hormone_df['date'])
+        if hormone_name not in self.hormone_distributions:
+            raise ValueError(f"Unknown hormone: {hormone_name}")
         
-        # Load period data if not already available
-        if not hasattr(self, 'period_df') or self.period_df is None:
-            self.period_df = pd.read_csv('output/period_sleep_data.csv')
-            self.period_df['date'] = pd.to_datetime(self.period_df['date'])
+        if phase not in self.hormone_distributions[hormone_name]:
+            raise ValueError(f"Unknown phase: {phase}")
         
-        # Initialize array for predictions
-        predictions = []
+        # Get distribution parameters for this hormone and phase
+        params = self.hormone_distributions[hormone_name][phase]
         
-        # Process each subject's data
-        for subject_id in hormone_df['subject_id'].unique():
-            subject_data = hormone_df[hormone_df['subject_id'] == subject_id].copy()
-            subject_data = subject_data.sort_values('date')
-            
-            # Get subject's survey data and phase durations
-            survey_info = self.survey_data.get(subject_id, {})
-            phase_durations = self.subject_phase_durations.get(subject_id, {})
-            
-            if not survey_info or not phase_durations:
-                logger.warning(f"No survey data or phase durations found for subject {subject_id}")
-                predictions.extend(['mid_follicular'] * len(subject_data))  # Default to mid_follicular
-                continue
-            
-            cycle_length = survey_info['cycle_length']
-            date_of_last_period = survey_info['date_of_last_period']
-            
-            # Get period data for this subject
-            subject_periods = self.period_df[self.period_df['subject_id'] == subject_id].copy()
-            subject_periods = subject_periods.sort_values('date')
-            
-            # Find actual period days (where period == 'Yes')
-            period_dates = subject_periods[subject_periods['period'] == 'Yes']['date'].tolist()
-            
-            # Calculate cycle day for each sample
-            for _, row in subject_data.iterrows():
-                sample_date = row['date']
-                
-                # Check if this sample date is a period day - assign perimenstruation
-                if sample_date in period_dates:
-                    predictions.append('perimenstruation')
-                    continue
-                
-                # Calculate days since last period
-                days_since_period = (sample_date - date_of_last_period).days
-                
-                # Calculate cycle day (1 to cycle_length)
-                cycle_day = (days_since_period % cycle_length) + 1
-                
-                # Use the realistic phase durations to determine the phase
-                # This uses the same logic as the simulation data generation
-                phase = self.get_phase_from_cycle_day(cycle_day, phase_durations)
-                predictions.append(phase)
+        # Sample from the distribution
+        mean = params['mean']
+        sd = params['sd']
         
-        return np.array(predictions) 
+        # Generate value
+        value = np.random.normal(mean, sd)
+        
+        # Ensure value is within bounds
+        min_val = params.get('min', 0)
+        max_val = params.get('max', float('inf'))
+        value = np.clip(value, min_val, max_val)
+        
+        return value
+    
+    def generate_hormone_series(self, subject_id: int, n_days: int) -> pd.DataFrame:
+        """
+        Generate hormone data series for a subject.
+        
+        Args:
+            subject_id (int): Subject ID
+            n_days (int): Number of days to generate
+            
+        Returns:
+            pd.DataFrame: DataFrame with hormone data
+        """
+        # Get phase durations for this subject
+        phase_durations = self.phase_durations
+        
+        data = []
+        cycle_day = 1
+        
+        for day in range(n_days):
+            # Determine current phase
+            phase = self.get_phase_from_cycle_day(cycle_day, phase_durations)
+            
+            # Generate hormone values
+            estradiol = self.get_hormone_value('estradiol', phase, cycle_day)
+            progesterone = self.get_hormone_value('progesterone', phase, cycle_day)
+            testosterone = self.get_hormone_value('testosterone', phase, cycle_day)
+            
+            data.append({
+                'subject_id': subject_id,
+                'day': day + 1,
+                'cycle_day': cycle_day,
+                'phase': phase,
+                'estradiol': estradiol,
+                'progesterone': progesterone,
+                'testosterone': testosterone
+            })
+            
+            cycle_day += 1
+            if cycle_day > sum(phase_durations.values()):
+                cycle_day = 1  # Reset to beginning of cycle
+        
+        return pd.DataFrame(data)
+    
+    def generate_all_subjects_data(self, n_subjects: int, n_days: int) -> pd.DataFrame:
+        """
+        Generate hormone data for all subjects.
+        
+        Args:
+            n_subjects (int): Number of subjects
+            n_days (int): Number of days per subject
+            
+        Returns:
+            pd.DataFrame: Combined hormone data for all subjects
+        """
+        all_data = []
+        
+        for subject_id in range(n_subjects):
+            subject_data = self.generate_hormone_series(subject_id, n_days)
+            all_data.append(subject_data)
+        
+        return pd.concat(all_data, ignore_index=True) 

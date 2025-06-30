@@ -63,7 +63,7 @@ rdoc_menstrual_classifier/
 ## Features
 
 - **Data Simulation**: Generate realistic hormone and period data based on scientific literature
-- **Multiple Classifiers**: Support for Random Forest, Logistic Regression, SVM, XGBoost, and LightGBM
+- **Multiple Classifiers**: Support for Random Forest, Logistic Regression, SVM, xgb, and LightGBM
 - **Rule-Based Prior**: Temporal model using survey responses and period data
 - **Configurable Prior Testing**: Evaluate ML models, rule-based prior, or both, with flexible combination and reporting via config
 - **Cross-Validation**: Comprehensive model evaluation with learning and validation curves
@@ -153,7 +153,7 @@ python src/main/compare_prior_weights.py
   - `outputs/data/survey_responses.csv` (survey responses)
 
 ### `train_model.py`
-- **Purpose**: Trains all ML models (Random Forest, Logistic Regression, SVM, XGBoost, LightGBM)
+- **Purpose**: Trains all ML models (Random Forest, Logistic Regression, SVM, xgb, LightGBM)
 - **Outputs**:
   - `outputs/models/*_bundle.joblib` (trained model bundles)
   - `outputs/reports/model_name/` (model-specific evaluation results)
@@ -231,7 +231,7 @@ The project supports multiple classification approaches:
 1. **Random Forest**: Ensemble method with feature importance analysis
 2. **Logistic Regression**: Linear model with interpretable coefficients
 3. **Support Vector Machine**: Non-linear classification with kernel methods
-4. **XGBoost**: Gradient boosting with advanced features
+4. **xgb**: Gradient boosting with advanced features
 5. **LightGBM**: Light gradient boosting machine
 6. **Rule-Based Prior**: Temporal model using survey and period data
 
@@ -303,7 +303,7 @@ python -m pytest tests/test_cross_validation.py
 - **scikit-learn**: Machine learning algorithms
 - **matplotlib**: Plotting and visualization
 - **seaborn**: Statistical data visualization
-- **xgboost**: XGBoost gradient boosting
+- **xgboost**: xgb gradient boosting
 - **lightgbm**: LightGBM gradient boosting
 - **pyyaml**: YAML configuration parsing
 - **joblib**: Model persistence

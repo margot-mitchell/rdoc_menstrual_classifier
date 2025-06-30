@@ -8,20 +8,26 @@ import sys
 import logging
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List
 from sklearn.model_selection import (
     StratifiedKFold, 
     cross_val_score, 
     learning_curve, 
-    validation_curve
+    validation_curve,
+    GroupKFold
 )
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score, 
+    confusion_matrix, classification_report, roc_auc_score
+)
 import matplotlib.pyplot as plt
 import seaborn as sns
+import tempfile
 
 # Add project root to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
+sys.path.append(os.path.join(project_root, 'src'))
 
 from src.utils.data_loader import load_config, load_and_split_data
 from src.utils.preprocessor import DataProcessor
@@ -87,8 +93,8 @@ def run_cross_validation(config: Dict[str, Any]) -> Dict[str, Any]:
         'Random Forest': RandomForestClassifier(config),
         'Logistic Regression': LogisticRegressionClassifier(config),
         'SVM': SVMClassifier(config),
-        'XGBoost': XGBoostClassifier(config),
-        'LightGBM': LightGBMClassifier(config)
+        'xgb': XGBoostClassifier(config),
+        'lgbm': LightGBMClassifier(config)
     }
     
     # Cross-validation settings
@@ -174,17 +180,19 @@ def run_cross_validation(config: Dict[str, Any]) -> Dict[str, Any]:
             
             # Generate learning curves if configured
             if config['output']['generate_learning_curves']:
-                # For XGBoost, use the custom classifier instead of raw model
-                if 'XGBoost' in name:
-                    generate_learning_curves(classifier, X, y, name, config)
+                # Use sklearn-compatible wrapper for XGBoost, raw model for others
+                if 'xgb' in name and hasattr(classifier, 'get_sklearn_compatible_model'):
+                    sklearn_model = classifier.get_sklearn_compatible_model()
+                    generate_learning_curves(sklearn_model, X, y, name, config)
                 else:
                     generate_learning_curves(classifier.model, X, y, name, config)
             
             # Generate validation curves if configured
             if config['output']['generate_validation_curves']:
-                # For XGBoost, use the custom classifier instead of raw model
-                if 'XGBoost' in name:
-                    generate_validation_curves(classifier, X, y, name, config)
+                # Use sklearn-compatible wrapper for XGBoost, raw model for others
+                if 'xgb' in name and hasattr(classifier, 'get_sklearn_compatible_model'):
+                    sklearn_model = classifier.get_sklearn_compatible_model()
+                    generate_validation_curves(sklearn_model, X, y, name, config)
                 else:
                     generate_validation_curves(classifier.model, X, y, name, config)
             
@@ -256,10 +264,10 @@ def generate_validation_curves(model, X, y, model_name: str, config: Dict[str, A
     elif 'SVM' in model_name:
         param_name = 'C'
         param_range = [0.001, 0.01, 0.1, 1, 10, 100]
-    elif 'XGBoost' in model_name:
+    elif 'xgb' in model_name:
         param_name = 'n_estimators'
         param_range = [10, 50, 100, 200, 300]
-    elif 'LightGBM' in model_name:
+    elif 'lgbm' in model_name:
         param_name = 'n_estimators'
         param_range = [10, 50, 100, 200, 300]
     else:
@@ -376,13 +384,37 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
     
     # Load original data for prior
     original_data = pd.read_csv(hormone_data_path)
+    original_data['date'] = pd.to_datetime(original_data['date'])
     
-    # Load preprocessed data for ML models
-    X_train, X_test, y_train, y_test = load_and_split_data(
-        hormone_data_path, 
-        test_size=data_config['test_size'], 
-        random_state=data_config['random_state']
-    )
+    # SIMULATE REAL-WORLD SCENARIO: Limit to 10 samples per subject
+    # This matches the deployment scenario where we only have 10 unlabeled samples per subject
+    logger.info("Simulating real-world scenario: Limiting to 10 samples per subject")
+    
+    limited_data = []
+    for subject_id in original_data['subject_id'].unique():
+        subject_data = original_data[original_data['subject_id'] == subject_id]
+        # Take first 10 samples per subject (or all if less than 10)
+        limited_subject_data = subject_data.head(10)
+        limited_data.append(limited_subject_data)
+    
+    original_data = pd.concat(limited_data, ignore_index=True)
+    logger.info(f"Limited data size: {len(original_data)} samples across {len(original_data['subject_id'].unique())} subjects")
+    
+    # Load preprocessed data for ML models (using limited data)
+    # We need to create a temporary file with limited data for the data loader
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+        original_data.to_csv(f.name, index=False)
+        temp_data_path = f.name
+    
+    try:
+        X_train, X_test, y_train, y_test = load_and_split_data(
+            temp_data_path, 
+            test_size=data_config['test_size'], 
+            random_state=data_config['random_state']
+        )
+    finally:
+        # Clean up temporary file
+        os.unlink(temp_data_path)
     
     # For cross-validation, we'll use the combined training and test data
     X = pd.concat([X_train, X_test], axis=0)
@@ -402,8 +434,8 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
         'Random Forest': RandomForestClassifier(config),
         'Logistic Regression': LogisticRegressionClassifier(config),
         'SVM': SVMClassifier(config),
-        'XGBoost': XGBoostClassifier(config),
-        'LightGBM': LightGBMClassifier(config)
+        'xgb': XGBoostClassifier(config),
+        'lgbm': LightGBMClassifier(config)
     }
     
     # Cross-validation settings
@@ -411,8 +443,12 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
     cv_folds = cv_config['cv_folds']
     prior_weight = config['prior_testing']['prior_weight']
     
-    # Initialize cross-validation
-    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=cv_config['random_state'])
+    # Use GroupKFold to keep all samples from the same subject together
+    # This ensures the prior has access to each subject's complete period data
+    cv = GroupKFold(n_splits=cv_folds)
+    
+    # Get subject IDs for grouping
+    subject_ids = original_data['subject_id'].values
     
     # Store results
     prior_results = {}
@@ -440,7 +476,13 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
                 'combined_f1': []
             }
             
-            for train_idx, test_idx in cv.split(X, y):
+            # Collect all predictions across folds for confusion matrices
+            all_true_labels = []
+            all_ml_predictions = []
+            all_prior_predictions = []
+            all_combined_predictions = []
+            
+            for train_idx, test_idx in cv.split(X, y, groups=subject_ids):
                 X_train_fold, X_test_fold = X.iloc[train_idx], X.iloc[test_idx]
                 y_train_fold, y_test_fold = y.iloc[train_idx], y.iloc[test_idx]
                 
@@ -461,6 +503,12 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
                     y_pred_ml, y_pred_prior, prior_weight
                 )
                 
+                # Collect predictions for confusion matrices
+                all_true_labels.extend(y_test_fold.values)
+                all_ml_predictions.extend(y_pred_ml)
+                all_prior_predictions.extend(y_pred_prior)
+                all_combined_predictions.extend(y_pred_combined)
+                
                 # Calculate metrics for ML-only
                 fold_metrics['ml_only_accuracy'].append(accuracy_score(y_test_fold, y_pred_ml))
                 fold_metrics['ml_only_precision'].append(
@@ -474,15 +522,15 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 
                 # Calculate metrics for prior-only
-                fold_metrics['prior_only_accuracy'].append(accuracy_score(y_test_fold, y_pred_prior))
+                fold_metrics['prior_only_accuracy'].append(accuracy_score(original_test_fold['phase'].values, y_pred_prior))
                 fold_metrics['prior_only_precision'].append(
-                    precision_score(y_test_fold, y_pred_prior, average='weighted', zero_division=0)
+                    precision_score(original_test_fold['phase'].values, y_pred_prior, average='weighted', zero_division=0)
                 )
                 fold_metrics['prior_only_recall'].append(
-                    recall_score(y_test_fold, y_pred_prior, average='weighted')
+                    recall_score(original_test_fold['phase'].values, y_pred_prior, average='weighted')
                 )
                 fold_metrics['prior_only_f1'].append(
-                    f1_score(y_test_fold, y_pred_prior, average='weighted')
+                    f1_score(original_test_fold['phase'].values, y_pred_prior, average='weighted')
                 )
                 
                 # Calculate metrics for combined
@@ -496,6 +544,53 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
                 fold_metrics['combined_f1'].append(
                     f1_score(y_test_fold, y_pred_combined, average='weighted')
                 )
+            
+            # Generate confusion matrices
+            phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
+            model_results_dir = get_model_results_dir(config['output']['results_dir'], name)
+            
+            # ML-only confusion matrix
+            cm_ml = confusion_matrix(all_true_labels, all_ml_predictions, labels=phases)
+            plt.figure(figsize=(8, 6))
+            sns.heatmap(cm_ml, annot=True, fmt='d', cmap='Blues', xticklabels=phases, yticklabels=phases)
+            plt.xlabel('Predicted Phase')
+            plt.ylabel('True Phase')
+            plt.title(f'{name} - ML Only Confusion Matrix')
+            plt.tight_layout()
+            ml_cm_path = os.path.join(model_results_dir, 'confusion_matrix_cv.png')
+            plt.savefig(ml_cm_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            logger.info(f"ML-only confusion matrix saved to {ml_cm_path}")
+            
+            # Prior-only confusion matrix (save only once in dedicated prior directory)
+            if name == list(classifiers.keys())[0]:  # Only save for first model
+                prior_results_dir = os.path.join(config['output']['results_dir'], 'prior')
+                os.makedirs(prior_results_dir, exist_ok=True)
+                
+                cm_prior = confusion_matrix(all_true_labels, all_prior_predictions, labels=phases)
+                plt.figure(figsize=(8, 6))
+                sns.heatmap(cm_prior, annot=True, fmt='d', cmap='Blues', xticklabels=phases, yticklabels=phases)
+                plt.xlabel('Predicted Phase')
+                plt.ylabel('True Phase')
+                plt.title('Prior Only Confusion Matrix')
+                plt.tight_layout()
+                prior_cm_path = os.path.join(prior_results_dir, 'prior_confusion_matrix.png')
+                plt.savefig(prior_cm_path, dpi=300, bbox_inches='tight')
+                plt.close()
+                logger.info(f"Prior-only confusion matrix saved to {prior_cm_path}")
+            
+            # Combined confusion matrix
+            cm_combined = confusion_matrix(all_true_labels, all_combined_predictions, labels=phases)
+            plt.figure(figsize=(8, 6))
+            sns.heatmap(cm_combined, annot=True, fmt='d', cmap='Blues', xticklabels=phases, yticklabels=phases)
+            plt.xlabel('Predicted Phase')
+            plt.ylabel('True Phase')
+            plt.title(f'{name} - ML + Prior Combined Confusion Matrix')
+            plt.tight_layout()
+            combined_cm_path = os.path.join(model_results_dir, 'combined_confusion_matrix.png')
+            plt.savefig(combined_cm_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            logger.info(f"Combined confusion matrix saved to {combined_cm_path}")
             
             # Store results
             prior_results[name] = {
@@ -586,12 +681,15 @@ def save_prior_results(prior_results: Dict[str, Any], config: Dict[str, Any]):
 
 def combine_predictions(ml_predictions: np.ndarray, prior_predictions: np.ndarray, prior_weight: float = 0.3) -> np.ndarray:
     """
-    Combine ML and prior predictions using weighted voting.
+    Combine ML and prior predictions using smart weighted voting.
+    
+    The prior gets 100% weight for phases it's known to be perfect at (perimenstruation),
+    and the configured weight for other phases.
     
     Args:
         ml_predictions: Array of ML predictions
         prior_predictions: Array of prior predictions
-        prior_weight: Weight for prior predictions (0.0 to 1.0)
+        prior_weight: Weight for prior predictions (0.0 to 1.0) for non-perfect phases
         
     Returns:
         np.ndarray: Combined predictions
@@ -599,29 +697,42 @@ def combine_predictions(ml_predictions: np.ndarray, prior_predictions: np.ndarra
     # Define phase order
     phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
     
-    # Convert predictions to indices
-    ml_indices = np.array([phases.index(pred) if pred in phases else 0 for pred in ml_predictions])
-    prior_indices = np.array([phases.index(pred) if pred in phases else 0 for pred in prior_predictions])
+    # Phases where prior has perfect accuracy (should get 100% weight)
+    perfect_prior_phases = ['perimenstruation']  # Add other phases as needed
     
-    # Create probability matrices
-    n_samples = len(ml_predictions)
-    n_phases = len(phases)
+    combined_predictions = []
     
-    ml_probs = np.zeros((n_samples, n_phases))
-    prior_probs = np.zeros((n_samples, n_phases))
+    for i in range(len(ml_predictions)):
+        ml_pred = ml_predictions[i]
+        prior_pred = prior_predictions[i]
+        
+        # If prior predicts a phase it's perfect at, use prior prediction
+        if prior_pred in perfect_prior_phases:
+            combined_predictions.append(prior_pred)
+        # If ML predicts a phase the prior is perfect at, use prior prediction
+        elif ml_pred in perfect_prior_phases:
+            combined_predictions.append(prior_pred)
+        # Otherwise, use weighted combination
+        else:
+            # Convert predictions to indices
+            ml_idx = phases.index(ml_pred)
+            prior_idx = phases.index(prior_pred)
+            
+            # Create probability vectors
+            ml_probs = np.zeros(len(phases))
+            prior_probs = np.zeros(len(phases))
+            
+            ml_probs[ml_idx] = 1.0
+            prior_probs[prior_idx] = 1.0
+            
+            # Combine probabilities
+            combined_probs = (1 - prior_weight) * ml_probs + prior_weight * prior_probs
+            
+            # Get final prediction
+            combined_pred = phases[np.argmax(combined_probs)]
+            combined_predictions.append(combined_pred)
     
-    # Set probabilities based on predictions
-    for i in range(n_samples):
-        ml_probs[i, ml_indices[i]] = 1.0
-        prior_probs[i, prior_indices[i]] = 1.0
-    
-    # Combine probabilities
-    combined_probs = (1 - prior_weight) * ml_probs + prior_weight * prior_probs
-    
-    # Get final predictions
-    combined_predictions = np.array([phases[np.argmax(probs)] for probs in combined_probs])
-    
-    return combined_predictions
+    return np.array(combined_predictions)
 
 
 def main():
@@ -635,7 +746,7 @@ def main():
     
     # Check if prior testing is enabled
     prior_config = config.get('prior_testing', {})
-    prior_enabled = prior_config.get('enabled', False)
+    prior_enabled = prior_config.get('enabled', True)
     test_both = prior_config.get('test_both', True)
     
     if prior_enabled:

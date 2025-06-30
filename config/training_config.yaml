@@ -38,7 +38,7 @@ models:
     gamma: "scale"
     random_state: 42
   
-  xgboost:
+  xgb:
     n_estimators: 100
     max_depth: 6
     learning_rate: 0.1
@@ -57,7 +57,7 @@ models:
   temporal:
     sequence_length: 70
     use_as_prior: false
-    prior_weight: 0.3
+    prior_weight: 0.7
 
 # Cross-validation
 cross_validation:

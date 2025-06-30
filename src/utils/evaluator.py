@@ -364,7 +364,7 @@ class ModelEvaluator:
         
         # Save plot
         model_dir = self._get_model_dir(model_name)
-        output_path = os.path.join(model_dir, 'confusion_matrix.png')
+        output_path = os.path.join(model_dir, 'confusion_matrix_test_set.png')
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
     

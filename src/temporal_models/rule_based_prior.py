@@ -85,11 +85,13 @@ class RuleBasedPrior:
     
     def get_subject_phase_durations(self, subject_id: int) -> Dict[str, int]:
         """
-        Deterministically sample phase durations for a subject using subject_id as the seed.
+        Deterministically sample phase durations for a subject using (subject_id + 2000) as the seed.
+        This ensures the prior gets different phase durations than the simulation (which uses subject_id as seed).
         Also applies menstrual pattern variability if available.
         """
         if subject_id not in self.phase_durations_by_subject:
-            np.random.seed(subject_id)
+            # Use different seed than simulation to avoid data leakage
+            np.random.seed(subject_id + 2000)
             
             # Get menstrual pattern if available
             sd_multiplier = 1.0  # default
@@ -220,71 +222,55 @@ class RuleBasedPrior:
     
     def predict_phase_from_period_data(self, subject_id: int, target_date: datetime) -> str:
         """
-        Predict phase using actual period data.
-        Only assign perimenstruation if period == 'Yes'.
-        For all other days, use only non-perimenstruation phases for phase duration mapping.
+        Predict phase using actual period data and survey anchor logic.
+        Handles cases where survey date_of_last_period is before, within, or after period data range.
         """
-        if self.period_df is None:
+        if self.period_df is None or self.survey_df is None:
             return 'unknown'
-            
+
         # Get period data for this subject
-        subject_periods = self.period_df[
-            (self.period_df['subject_id'] == subject_id) & 
-            (self.period_df['date'] == target_date.strftime('%Y-%m-%d'))
-        ].copy()
-        
-        # If we have period data for this exact date, check if it's a period day
-        if not subject_periods.empty:
-            if subject_periods.iloc[0]['period'] == 'Yes':
-                return 'perimenstruation'
-        
-        # For non-period days, use phase durations to fill in the gaps, but never assign perimenstruation
-        # Get all period days for this subject
-        all_period_days = self.period_df[
-            (self.period_df['subject_id'] == subject_id) & 
-            (self.period_df['period'] == 'Yes')
-        ].copy()
-        
-        if all_period_days.empty:
+        subject_periods = self.period_df[self.period_df['subject_id'] == subject_id].copy()
+        if subject_periods.empty:
             return 'unknown'
-            
-        # Sort by date
-        all_period_days = all_period_days.sort_values('date')
-        
-        # Find the most recent period before or on target date
-        recent_periods = all_period_days[all_period_days['date'] <= target_date]
-        
-        if recent_periods.empty:
-            # If no periods before target date, use the first period and backcount
-            first_period = all_period_days.iloc[0]['date']
-            days_before_first = (first_period - target_date).days
-            
-            # Estimate cycle length from available periods
-            if len(all_period_days) >= 2:
-                cycle_length = self._estimate_cycle_length(all_period_days)
-            else:
-                cycle_length = 28  # Default
-                
-            # Backcount cycles
-            estimated_cycle_day = (cycle_length - (days_before_first % cycle_length)) % cycle_length
-            if estimated_cycle_day == 0:
-                estimated_cycle_day = cycle_length
-                
-            return self._map_cycle_day_to_nonperi_phase(estimated_cycle_day, cycle_length, subject_id)
+        subject_periods['date'] = pd.to_datetime(subject_periods['date'])
+        subject_periods = subject_periods.sort_values('date')
+        period_dates = subject_periods[subject_periods['period'] == 'Yes']['date']
+        if period_dates.empty:
+            return 'unknown'
+        first_period_date = period_dates.min()
+        last_period_date = period_dates.max()
+
+        # Get survey date_of_last_period
+        survey_row = self.survey_df[self.survey_df['subject_id'] == subject_id]
+        if survey_row.empty:
+            return 'unknown'
+        survey_last_period = pd.to_datetime(survey_row.iloc[0]['date_of_last_period'])
+        cycle_length = survey_row.iloc[0]['cycle_length']
+
+        if survey_last_period < first_period_date:
+            # Survey anchor is before period data range: forward count to find first anchor in data
+            anchor = survey_last_period
+            anchors = [anchor]
+            while anchor < first_period_date:
+                anchor += pd.Timedelta(days=cycle_length)
+                anchors.append(anchor)
+            # Now, for any target_date, find the most recent anchor <= target_date
+            recent_anchor = max([a for a in anchors if a <= target_date], default=anchors[0])
+            days_since_anchor = (target_date - recent_anchor).days
+            cycle_day = (days_since_anchor % cycle_length) + 1
+        elif survey_last_period > last_period_date:
+            # Survey date is after period data: error
+            raise ValueError(f"date_of_last_period for subject {subject_id} is after last period data date. Check survey data.")
         else:
-            # Use most recent period and forwardcount
-            last_period = recent_periods.iloc[-1]['date']
-            days_since_period = (target_date - last_period).days
-            
-            # Estimate cycle length
-            if len(all_period_days) >= 2:
-                cycle_length = self._estimate_cycle_length(all_period_days)
-            else:
-                cycle_length = 28  # Default
-                
-            # Calculate cycle day
-            cycle_day = (days_since_period % cycle_length) + 1
-            
+            # Survey anchor is within period data: use first 'Yes' period value as anchor
+            anchor = first_period_date
+            days_since_anchor = (target_date - anchor).days
+            cycle_day = (days_since_anchor % cycle_length) + 1
+
+        # Map cycle day to phase (never assign perimenstruation except on period days)
+        if target_date in period_dates.values:
+            return 'perimenstruation'
+        else:
             return self._map_cycle_day_to_nonperi_phase(cycle_day, cycle_length, subject_id)
     
     def _estimate_cycle_length(self, period_data: pd.DataFrame) -> float:
@@ -402,9 +388,39 @@ class RuleBasedPrior:
             current_day += proportional_duration
         return nonperi_phases[-1]
     
+    def predict_phase_from_hormones(self, estradiol: float, progesterone: float, testosterone: float) -> str:
+        """
+        Predict phase using hormone-based rules.
+        All hormone rules are commented out; always returns None.
+        """
+        # # Rule 1: Clear estradiol peak (periovulation)
+        # if estradiol > 2.0:
+        #     return 'periovulation'
+        # 
+        # # Rule 2: High progesterone indicates luteal phases
+        # if progesterone > 150:
+        #     if progesterone > 250:
+        #         return 'mid_late_luteal'
+        #     else:
+        #         return 'early_luteal'
+        # 
+        # # Rule 3: Low estradiol and low progesterone = mid-follicular
+        # if estradiol < 1.5 and progesterone < 120:
+        #     return 'mid_follicular'
+        # 
+        # # Rule 4: Moderate estradiol but low progesterone = late follicular
+        # if 1.5 <= estradiol <= 2.0 and progesterone < 150:
+        #     return 'periovulation'
+        # 
+        # # Rule 5: High progesterone but moderate estradiol = early luteal
+        # if 120 <= progesterone <= 150 and estradiol < 2.0:
+        #     return 'early_luteal'
+        return None
+
     def predict_phases(self, hormone_data: pd.DataFrame) -> np.ndarray:
         """
         Predict phases for hormone data using rule-based logic.
+        Prioritizes period data for perimenstruation detection.
         
         Args:
             hormone_data: DataFrame with hormone measurements
@@ -420,25 +436,149 @@ class RuleBasedPrior:
         for _, row in hormone_data.iterrows():
             subject_id = row['subject_id']
             
-            # Try to get date from the data
-            if 'date' in hormone_data.columns:
+            # First, check if this is a period day using period data
+            if 'date' in hormone_data.columns and self.period_df is not None:
                 target_date = pd.to_datetime(row['date'])
-            else:
-                # If no date column, use a default date
-                target_date = pd.to_datetime('2024-01-01')
-            
-            # Try period data first (more accurate), then fall back to survey
-            if self.period_df is not None:
-                phase = self.predict_phase_from_period_data(subject_id, target_date)
-            elif self.survey_df is not None:
-                phase = self.predict_phase_from_survey(subject_id, target_date)
-            else:
-                phase = 'unknown'
+                period_phase = self.predict_phase_from_period_data(subject_id, target_date)
                 
-            predictions.append(phase)
+                # If period data indicates perimenstruation, use it
+                if period_phase == 'perimenstruation':
+                    predictions.append('perimenstruation')
+                    continue
+            
+            # For non-period days, try hormone-based rules first
+            hormone_phase = self.predict_phase_from_hormones(
+                row['estradiol'], row['progesterone'], row['testosterone']
+            )
+            
+            if hormone_phase:
+                predictions.append(hormone_phase)
+            else:
+                # Fall back to temporal rules if hormone rules don't match
+                # Try to get date from the data
+                if 'date' in hormone_data.columns:
+                    target_date = pd.to_datetime(row['date'])
+                else:
+                    # If no date column, use a default date
+                    target_date = pd.to_datetime('2024-01-01')
+                
+                # Try period data first (more accurate), then fall back to survey
+                if self.period_df is not None:
+                    phase = self.predict_phase_from_period_data(subject_id, target_date)
+                elif self.survey_df is not None:
+                    phase = self.predict_phase_from_survey(subject_id, target_date)
+                else:
+                    phase = 'unknown'
+                    
+                predictions.append(phase)
             
         return np.array(predictions)
     
+    def generate_hormone_rule_features(self, hormone_data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Generate hormone rule-based features for ML models.
+        These features encode the hormone patterns that indicate different phases.
+        
+        Args:
+            hormone_data: DataFrame with hormone measurements
+            
+        Returns:
+            pd.DataFrame: DataFrame with hormone rule features
+        """
+        features = pd.DataFrame(index=hormone_data.index)
+        
+        # Feature 1: Estradiol peak indicator (periovulation)
+        features['estradiol_peak'] = (hormone_data['estradiol'] > 4.0).astype(int)
+        
+        # Feature 2: Progesterone peak indicator (mid_late_luteal)
+        features['progesterone_peak'] = (hormone_data['progesterone'] > 300).astype(int)
+        
+        # Feature 3: E2/P4 ratio features (with safe division)
+        ratio = hormone_data['estradiol'] / (hormone_data['progesterone'] + 1e-8)
+        features['e2_p4_high_ratio'] = (ratio > 0.02).astype(int)  # periovulation
+        features['e2_p4_low_ratio'] = (ratio < 0.005).astype(int)  # mid_late_luteal
+        
+        # Feature 4: Hormone level ranges
+        features['estradiol_low'] = (hormone_data['estradiol'] < 2.0).astype(int)
+        features['estradiol_moderate'] = ((hormone_data['estradiol'] >= 2.0) & (hormone_data['estradiol'] <= 4.0)).astype(int)
+        features['estradiol_high'] = (hormone_data['estradiol'] > 4.0).astype(int)
+        
+        features['progesterone_low'] = (hormone_data['progesterone'] < 150).astype(int)
+        features['progesterone_moderate'] = ((hormone_data['progesterone'] >= 150) & (hormone_data['progesterone'] <= 300)).astype(int)
+        features['progesterone_high'] = (hormone_data['progesterone'] > 300).astype(int)
+        
+        # Feature 5: Combined hormone patterns
+        features['mid_follicular_pattern'] = (
+            (hormone_data['estradiol'] >= 2.0) & 
+            (hormone_data['estradiol'] <= 4.0) & 
+            (hormone_data['progesterone'] < 200)
+        ).astype(int)
+        
+        features['early_luteal_pattern'] = (
+            (hormone_data['progesterone'] >= 150) & 
+            (hormone_data['progesterone'] <= 300) & 
+            (hormone_data['estradiol'] >= 1.5) & 
+            (hormone_data['estradiol'] <= 3.0)
+        ).astype(int)
+        
+        # Feature 6: Raw hormone values (safely normalized)
+        estradiol_max = hormone_data['estradiol'].max()
+        progesterone_max = hormone_data['progesterone'].max()
+        testosterone_max = hormone_data['testosterone'].max()
+        
+        features['estradiol_norm'] = hormone_data['estradiol'] / (estradiol_max + 1e-8)
+        features['progesterone_norm'] = hormone_data['progesterone'] / (progesterone_max + 1e-8)
+        features['testosterone_norm'] = hormone_data['testosterone'] / (testosterone_max + 1e-8)
+        
+        # Feature 7: Hormone ratios (with bounds)
+        features['e2_p4_ratio'] = np.clip(ratio, 0, 1.0)  # Clip to prevent extreme values
+        features['e2_t_ratio'] = np.clip(hormone_data['estradiol'] / (hormone_data['testosterone'] + 1e-8), 0, 1.0)
+        features['p4_t_ratio'] = np.clip(hormone_data['progesterone'] / (hormone_data['testosterone'] + 1e-8), 0, 1.0)
+        
+        # Feature 8: Hormone interactions (with bounds)
+        features['e2_p4_interaction'] = np.clip(hormone_data['estradiol'] * hormone_data['progesterone'] / 1000, 0, 10)
+        features['e2_t_interaction'] = np.clip(hormone_data['estradiol'] * hormone_data['testosterone'] / 1000, 0, 10)
+        features['p4_t_interaction'] = np.clip(hormone_data['progesterone'] * hormone_data['testosterone'] / 1000, 0, 10)
+        
+        # Feature 9: Period indicators (if available)
+        if 'date' in hormone_data.columns and self.period_df is not None:
+            period_indicators = []
+            for _, row in hormone_data.iterrows():
+                subject_id = row['subject_id']
+                target_date = pd.to_datetime(row['date'])
+                period_phase = self.predict_phase_from_period_data(subject_id, target_date)
+                period_indicators.append(1 if period_phase == 'perimenstruation' else 0)
+            features['period_indicator'] = period_indicators
+        else:
+            features['period_indicator'] = 0
+        
+        # Feature 10: Confidence scores for hormone rules
+        confidence_scores = []
+        for i, row in hormone_data.iterrows():
+            confidence = 0.0
+            
+            # High confidence for clear hormone patterns
+            if row['estradiol'] > 4.0:
+                confidence += 0.8
+            elif row['progesterone'] > 300:
+                confidence += 0.8
+            elif ratio.iloc[i] > 0.02:
+                confidence += 0.6
+            elif ratio.iloc[i] < 0.005:
+                confidence += 0.6
+            elif features.loc[i, 'mid_follicular_pattern']:
+                confidence += 0.4
+            elif features.loc[i, 'early_luteal_pattern']:
+                confidence += 0.4
+            else:
+                confidence += 0.1  # Low confidence for unclear patterns
+                
+            confidence_scores.append(min(confidence, 1.0))
+        
+        features['hormone_rule_confidence'] = confidence_scores
+        
+        return features
+
     def get_prior_probabilities(self, hormone_data: pd.DataFrame) -> np.ndarray:
         """
         Get prior probabilities for each phase based on rule-based predictions.

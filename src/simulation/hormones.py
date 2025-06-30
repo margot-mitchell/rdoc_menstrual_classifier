@@ -1,65 +1,69 @@
+import numpy as np
 import pandas as pd
-from datetime import timedelta
-from src.config.hormone_config import (
+from datetime import datetime, timedelta
+from src.simulation.utils import (
     generate_estradiol_value,
     generate_progesterone_value,
-    sample_lognormal_from_distribution,
-    get_testosterone_distribution
+    generate_testosterone_value
 )
-from src.config.phase_config import get_phase_from_cycle_day
+from src.simulation.utils import get_phase_from_cycle_day
 
-def generate_hormone_data(subject_params, n_hormone_samples):
+def generate_hormone_data(subject_params, n_samples):
     """
-    Generate hormone data for a single subject.
+    Generate hormone data for a subject.
     
     Args:
         subject_params (dict): Subject parameters from initialize_subject
-        n_hormone_samples (int): Number of days of hormone data to generate
+        n_samples (int): Number of hormone samples to generate
         
     Returns:
-        list: List of hormone data points
+        pd.DataFrame: Hormone data
     """
-    hormone_data = []
+    data = []
+    current_date = subject_params['start_date']
+    cycle_day = subject_params['start_idx'] + 1
     
-    for day in range(n_hormone_samples):
-        # Calculate cycle day (1 to total_cycle_length)
-        cycle_day = ((day + subject_params['start_idx']) % subject_params['total_cycle_length']) + 1
-        
-        # Get current phase
+    for sample in range(n_samples):
         current_phase = get_phase_from_cycle_day(cycle_day, subject_params['phase_durations'])
         
         # Generate hormone values
-        estradiol = generate_estradiol_value(cycle_day, subject_params['baselines']['estradiol'])
-        progesterone = generate_progesterone_value(cycle_day, subject_params['baselines']['progesterone'])
-        testosterone = sample_lognormal_from_distribution(get_testosterone_distribution(cycle_day=cycle_day))
+        estradiol = generate_estradiol_value(cycle_day, subject_params['baselines']['estradiol'], subject_params['phase_durations'])
+        progesterone = generate_progesterone_value(cycle_day, subject_params['baselines']['progesterone'], subject_params['phase_durations'])
+        testosterone = generate_testosterone_value(cycle_day, subject_params['baselines']['testosterone'], subject_params['phase_durations'])
         
-        hormone_data.append({
+        data.append({
             'subject_id': subject_params['subject_id'],
-            'date': (subject_params['start_date'] + timedelta(days=day)).strftime('%Y-%m-%d'),
+            'date': current_date.strftime('%Y-%m-%d'),
             'cycle_day': cycle_day,
+            'phase': current_phase,
             'estradiol': estradiol,
             'progesterone': progesterone,
-            'testosterone': testosterone,
-            'phase': current_phase
+            'testosterone': testosterone
         })
+        
+        current_date += pd.Timedelta(days=1)
+        cycle_day += 1
+        
+        # Reset cycle day when we reach the end of the cycle
+        if cycle_day > subject_params['total_cycle_length']:
+            cycle_day = 1
     
-    return hormone_data
+    return pd.DataFrame(data)
 
-def generate_all_hormone_data(subjects, n_hormone_samples):
+def generate_all_hormone_data(subjects, n_samples):
     """
     Generate hormone data for all subjects.
     
     Args:
         subjects (list): List of subject parameters
-        n_hormone_samples (int): Number of days of hormone data to generate
+        n_samples (int): Number of hormone samples to generate
         
     Returns:
-        pd.DataFrame: DataFrame containing hormone data for all subjects
+        pd.DataFrame: Combined hormone data for all subjects
     """
-    all_hormone_data = []
-    
+    all_data = []
     for subject_params in subjects:
-        subject_hormone_data = generate_hormone_data(subject_params, n_hormone_samples)
-        all_hormone_data.extend(subject_hormone_data)
+        subject_data = generate_hormone_data(subject_params, n_samples)
+        all_data.append(subject_data)
     
-    return pd.DataFrame(all_hormone_data) 
+    return pd.concat(all_data, ignore_index=True) 

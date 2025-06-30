@@ -70,7 +70,17 @@ class DataPreprocessor:
                 from src.temporal_models.rule_based_prior import RuleBasedPrior
                 rule_prior = RuleBasedPrior(self.prior_config)
                 rule_prior.load_data()
+                
+                # Generate hormone rule features instead of just predictions
+                hormone_rule_features = rule_prior.generate_hormone_rule_features(df)
+                
+                # Also get prior predictions for comparison
                 prior_predictions = rule_prior.predict_phases(df)
+                
+                # Add hormone rule features
+                X = pd.concat([X, hormone_rule_features], axis=1)
+                
+                # Add prior predictions as categorical features
                 X['prior_phase'] = prior_predictions
                 phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
                 prior_encoded = pd.get_dummies(X['prior_phase'], prefix='prior')
@@ -80,7 +90,8 @@ class DataPreprocessor:
                         prior_encoded[col_name] = 0
                 X = X.drop('prior_phase', axis=1)
                 X = pd.concat([X, prior_encoded], axis=1)
-                logger.info(f"Added {len(prior_encoded.columns)} prior features to the dataset")
+                
+                logger.info(f"Added {len(hormone_rule_features.columns)} hormone rule features and {len(prior_encoded.columns)} prior features to the dataset")
             except Exception as e:
                 logger.warning(f"Could not add prior features: {str(e)}")
         

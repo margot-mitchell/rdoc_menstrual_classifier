@@ -163,7 +163,7 @@ class XGBoostClassifier(BaseClassifier):
     def __init__(self, config: Dict[str, Any]):
         import xgboost as xgb
         from sklearn.preprocessing import LabelEncoder
-        xgb_config = config['models']['xgboost']
+        xgb_config = config['models']['xgb']
         self.model = xgb.XGBClassifier(
             n_estimators=xgb_config['n_estimators'],
             max_depth=xgb_config['max_depth'],
@@ -216,6 +216,31 @@ class XGBoostClassifier(BaseClassifier):
         self.feature_names = model_data['feature_names']
         self.label_encoder = model_data.get('label_encoder', None)
         self.is_fitted = self.label_encoder is not None
+    
+    def get_sklearn_compatible_model(self):
+        """Return a scikit-learn compatible wrapper for learning curves."""
+        if not self.is_fitted:
+            raise ValueError("Model must be trained before getting sklearn compatible wrapper")
+        
+        class XGBoostSklearnWrapper:
+            def __init__(self, xgb_model, label_encoder):
+                self.xgb_model = xgb_model
+                self.label_encoder = label_encoder
+            
+            def fit(self, X, y):
+                y_encoded = self.label_encoder.transform(y)
+                self.xgb_model.fit(X, y_encoded)
+                return self
+            
+            def predict(self, X):
+                y_pred_encoded = self.xgb_model.predict(X)
+                return self.label_encoder.inverse_transform(y_pred_encoded)
+            
+            def predict_proba(self, X):
+                """Get prediction probabilities."""
+                return self.xgb_model.predict_proba(X)
+        
+        return XGBoostSklearnWrapper(self.model, self.label_encoder)
 
 
 class LightGBMClassifier(BaseClassifier):
@@ -223,7 +248,7 @@ class LightGBMClassifier(BaseClassifier):
     
     def __init__(self, config: Dict[str, Any]):
         import lightgbm as lgb
-        lgb_config = config['models']['lightgbm']
+        lgb_config = config['models']['lgbm']
         self.model = lgb.LGBMClassifier(
             n_estimators=lgb_config['n_estimators'],
             max_depth=lgb_config['max_depth'],
@@ -379,8 +404,8 @@ def run_classification(config: Dict[str, Any]):
         'Random Forest': RandomForestClassifier(config),
         'Logistic Regression': LogisticRegressionClassifier(config),
         'SVM': SVMClassifier(config),
-        'XGBoost': XGBoostClassifier(config),
-        'LightGBM': LightGBMClassifier(config)
+        'xgb': XGBoostClassifier(config),
+        'lgbm': LightGBMClassifier(config)
     }
     
     # Train and evaluate each classifier

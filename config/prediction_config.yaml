@@ -17,7 +17,7 @@ features:
 
 # Model parameters
 models:
-  xgboost:
+  xgb:
     n_estimators: 100
     max_depth: 6
     learning_rate: 0.1
@@ -36,7 +36,7 @@ models:
   temporal:
     sequence_length: 70
     use_as_prior: true  # Use prior features for prediction
-    prior_weight: 1
+    prior_weight: .7
 
 # Output settings
 output:

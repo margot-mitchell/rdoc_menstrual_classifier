@@ -64,8 +64,8 @@ def initialize_subject(subject_id, pattern, start_date, phase_duration_sd_multip
     Returns:
         dict: Subject parameters
     """
-    from src.config.hormone_config import sample_baseline_values
-    from src.config.phase_config import generate_phase_durations
+    from src.simulation.utils import sample_baseline_values
+    from src.simulation.utils import generate_phase_durations
     
     baselines = sample_baseline_values(config_path)
     phase_durations = generate_phase_durations(sd_multiplier=phase_duration_sd_multiplier, config_path=config_path)

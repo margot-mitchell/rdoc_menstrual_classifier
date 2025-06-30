@@ -1,76 +1,62 @@
 import numpy as np
 import pandas as pd
-from datetime import timedelta
-from src.config.phase_config import get_phase_from_cycle_day
+from src.simulation.utils import get_phase_from_cycle_day
 
-def generate_period_data(subject_params, n_period_days):
+def generate_period_data(subject_params, n_days):
     """
-    Generate period and sleep data for a single subject.
+    Generate period data for a subject.
     
     Args:
         subject_params (dict): Subject parameters from initialize_subject
-        n_period_days (int): Number of days of period data to generate
+        n_days (int): Number of days to generate
         
     Returns:
-        list: List of period data points
+        pd.DataFrame: Period data
     """
-    period_data = []
+    data = []
+    current_date = subject_params['start_date']
+    cycle_day = subject_params['start_idx'] + 1
     
-    for day in range(n_period_days):
-        cycle_day = ((day + subject_params['start_idx']) % subject_params['total_cycle_length']) + 1
+    for day in range(n_days):
         current_phase = get_phase_from_cycle_day(cycle_day, subject_params['phase_durations'])
         
         # Determine if it's a period day (perimenstruation phase)
-        is_period = current_phase == 'perimenstruation'
+        period = 'Yes' if current_phase == 'perimenstruation' else 'No'
         
-        # Generate flow value
-        flow = 'N/A'
-        if is_period:
-            phase_day = cycle_day - sum(d for p, d in subject_params['phase_durations'].items() if p != 'perimenstruation')
-            if phase_day == 1:
-                flow = 'Heavy'
-            else:
-                flow = np.random.choice(['Light', 'Medium'])
+        # Calculate phase day (day within the current phase)
+        phase_day = cycle_day - sum(d for p, d in subject_params['phase_durations'].items() if p != 'perimenstruation')
         
-        # Generate spotting value
-        spotting = 'No'
-        if not is_period:
-            if current_phase == 'periovulation':
-                spotting = 'Yes' if np.random.random() < 0.3 else 'No'  # 30% chance
-            elif current_phase == 'mid_late_luteal' and cycle_day == subject_params['total_cycle_length']:
-                spotting = 'Yes' if np.random.random() < 0.2 else 'No'  # 20% chance
-        
-        # Generate sleep data
-        sleep_hours = np.random.uniform(4, 11)
-        
-        period_data.append({
+        data.append({
             'subject_id': subject_params['subject_id'],
-            'date': (subject_params['start_date'] + timedelta(days=day)).strftime('%Y-%m-%d'),
-            'cycle_day': cycle_day,
-            'period': 'Yes' if is_period else 'No',
-            'flow': flow,
-            'spotting': spotting,
-            'sleep_hours': sleep_hours,
-            'phase': current_phase
+            'date': current_date.strftime('%Y-%m-%d'),
+            'period': period,
+            'phase': current_phase,
+            'cycle_day': cycle_day
         })
+        
+        current_date += pd.Timedelta(days=1)
+        cycle_day += 1
+        
+        # Reset cycle day when we reach the end of the cycle
+        if cycle_day > subject_params['total_cycle_length']:
+            cycle_day = 1
     
-    return period_data
+    return pd.DataFrame(data)
 
-def generate_all_period_data(subjects, n_period_days):
+def generate_all_period_data(subjects, n_days):
     """
     Generate period data for all subjects.
     
     Args:
         subjects (list): List of subject parameters
-        n_period_days (int): Number of days of period data to generate
+        n_days (int): Number of days to generate
         
     Returns:
-        pd.DataFrame: DataFrame containing period data for all subjects
+        pd.DataFrame: Combined period data for all subjects
     """
-    all_period_data = []
-    
+    all_data = []
     for subject_params in subjects:
-        subject_period_data = generate_period_data(subject_params, n_period_days)
-        all_period_data.extend(subject_period_data)
+        subject_data = generate_period_data(subject_params, n_days)
+        all_data.append(subject_data)
     
-    return pd.DataFrame(all_period_data) 
+    return pd.concat(all_data, ignore_index=True) 

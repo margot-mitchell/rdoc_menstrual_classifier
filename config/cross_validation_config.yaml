@@ -14,7 +14,7 @@ data:
 prior_testing:
   enabled: true  # Set to false to run only pure ML cross-validation
   test_both: true  # Set to true to run both ML-only and ML+prior evaluations
-  prior_weight: 0.3  # Weight for prior in combined predictions
+  prior_weight: 0.7  # Weight for prior in combined predictions
 
 # Feature engineering
 features:
@@ -43,7 +43,7 @@ models:
     gamma: "scale"
     random_state: 42
 
-  xgboost:
+  xgb:
     n_estimators: 100
     max_depth: 6
     learning_rate: 0.1
@@ -51,7 +51,7 @@ models:
     colsample_bytree: 0.8
     random_state: 42
 
-  lightgbm:
+  lgbm:
     n_estimators: 100
     max_depth: 6
     learning_rate: 0.1
