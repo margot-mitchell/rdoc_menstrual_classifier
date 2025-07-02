@@ -183,32 +183,18 @@ python src/main/cross_validation.py
 
 The project uses YAML configuration files for easy parameter tuning:
 
-### Cross-Validation Configuration (`config/cross_validation_config.yaml`)
+Cross-Validation Configuration (`config/cross_validation_config.yaml`)
+Training Configuration (`config/training_config.yaml`)
+Prediction Configuration (`config/prediction_config.yaml`)
+Simulation Configuration (`config/simulation_config.yaml`)
 
-Key options for prior testing:
+Key options for enabling prior in training, predicition, and cross-validation:
 
 ```yaml
 prior_testing:
   enabled: true        # Enable prior testing
   prior_weight: 0.7   # Weight for prior in combined predictions (0.0-1.0)
 ```
-
-### Training Configuration (`config/training_config.yaml`)
-- Model hyperparameters for all classifiers
-- Feature engineering options
-- Prior feature integration settings
-- Output preferences
-
-### Prediction Configuration (`config/prediction_config.yaml`)
-- Model selection for prediction
-- Prior weight settings
-- Output format preferences
-
-### Simulation Configuration (`config/simulation_config.yaml`)
-- Number of subjects and samples
-- Hormone distribution parameters
-- Phase duration settings
-- Output settings
 
 ## 🧠 Classification Models
 
