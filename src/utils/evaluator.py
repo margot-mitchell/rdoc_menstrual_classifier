@@ -247,6 +247,39 @@ class ModelEvaluator:
         os.makedirs(model_dir, exist_ok=True)
         return model_dir
     
+    def _get_model_variant_dir(self, model_name: str, variant: str = None) -> str:
+        """
+        Get model-specific subdirectory path with optional variant subdirectory.
+        
+        Args:
+            model_name (str): Name of the model (e.g., "random_forest_with_prior")
+            variant (str): Optional variant name (e.g., "with_prior", "no_prior")
+            
+        Returns:
+            str: Path to model-specific subdirectory
+        """
+        # Extract base model name (remove _with_prior or _no_prior suffix)
+        base_model_name = model_name
+        if model_name.endswith('_with_prior'):
+            base_model_name = model_name[:-11]  # Remove "_with_prior"
+            variant = "with_prior"
+        elif model_name.endswith('_no_prior'):
+            base_model_name = model_name[:-9]   # Remove "_no_prior"
+            variant = "no_prior"
+        
+        # Clean base model name for directory name
+        clean_name = base_model_name.lower().replace(" ", "_").replace("-", "_")
+        model_dir = os.path.join(self.output_dir, clean_name)
+        
+        # Create variant subdirectory if specified
+        if variant:
+            variant_dir = os.path.join(model_dir, variant)
+            os.makedirs(variant_dir, exist_ok=True)
+            return variant_dir
+        else:
+            os.makedirs(model_dir, exist_ok=True)
+            return model_dir
+    
     def evaluate(self, y_true: np.ndarray, y_pred: np.ndarray, 
                 model_name: str, X: Optional[pd.DataFrame] = None,
                 subject_ids: Optional[np.ndarray] = None,
@@ -285,7 +318,7 @@ class ModelEvaluator:
             metrics['roc_auc'] = np.nan
         
         # Get model-specific directory
-        model_dir = self._get_model_dir(model_name)
+        model_dir = self._get_model_variant_dir(model_name)
         
         # Save detailed classification report
         report = classification_report(y_true, y_pred, output_dict=True)
@@ -323,7 +356,7 @@ class ModelEvaluator:
                 misclassified_data[col] = X.iloc[misclassified_mask][col].values
             
             misclassified_df = pd.DataFrame(misclassified_data)
-            model_dir = self._get_model_dir(model_name)
+            model_dir = self._get_model_variant_dir(model_name)
             output_path = os.path.join(model_dir, 'misclassified_samples.csv')
             misclassified_df.to_csv(output_path, index=False)
     
@@ -344,8 +377,8 @@ class ModelEvaluator:
         plt.title(f'Feature Importance for {model_name}')
         plt.gca().invert_yaxis()
         
-        # Save plot
-        model_dir = self._get_model_dir(model_name)
+        # Save plot using variant directory structure
+        model_dir = self._get_model_variant_dir(model_name)
         output_path = os.path.join(model_dir, 'feature_importance.png')
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
@@ -362,8 +395,8 @@ class ModelEvaluator:
         plt.ylabel('Actual')
         plt.title(f'Confusion Matrix for {model_name}')
         
-        # Save plot
-        model_dir = self._get_model_dir(model_name)
+        # Save plot using variant directory structure
+        model_dir = self._get_model_variant_dir(model_name)
         output_path = os.path.join(model_dir, 'confusion_matrix_test_set.png')
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
@@ -386,7 +419,7 @@ class ModelEvaluator:
         plt.grid(True)
         
         # Save plot
-        model_dir = self._get_model_dir(model_name)
+        model_dir = self._get_model_variant_dir(model_name)
         output_path = os.path.join(model_dir, 'roc_curve.png')
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
@@ -407,7 +440,7 @@ class ModelEvaluator:
         plt.grid(True)
         
         # Save plot
-        model_dir = self._get_model_dir(model_name)
+        model_dir = self._get_model_variant_dir(model_name)
         output_path = os.path.join(model_dir, 'precision_recall_curve.png')
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
