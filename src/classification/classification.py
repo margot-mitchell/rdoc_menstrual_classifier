@@ -95,6 +95,9 @@ class RandomForestClassifier(BaseClassifier):
         model_data = joblib.load(path)
         self.model = model_data['model']
         self.feature_names = model_data['feature_names']
+    
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        return self.model.predict_proba(X)
 
 
 class LogisticRegressionClassifier(BaseClassifier):
@@ -126,6 +129,9 @@ class LogisticRegressionClassifier(BaseClassifier):
         if not hasattr(self.model, 'coef_'):
             return {}
         return dict(zip(self.feature_names, np.abs(self.model.coef_[0])))
+    
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        return self.model.predict_proba(X)
 
 
 class SVMClassifier(BaseClassifier):
@@ -155,6 +161,9 @@ class SVMClassifier(BaseClassifier):
     def get_feature_importance(self) -> Dict[str, float]:
         """Get feature importance scores (not available for SVM)."""
         return {}
+    
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        return self.model.predict_proba(X)
 
 
 class XGBoostClassifier(BaseClassifier):
@@ -242,6 +251,14 @@ class XGBoostClassifier(BaseClassifier):
         
         return XGBoostSklearnWrapper(self.model, self.label_encoder)
 
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        # Return probabilities with label decoding
+        y_pred_proba = self.model.predict_proba(X)
+        if self.is_fitted:
+            # Return in the order of self.label_encoder.classes_
+            return y_pred_proba
+        return y_pred_proba
+
 
 class LightGBMClassifier(BaseClassifier):
     """LightGBM classifier implementation."""
@@ -274,6 +291,9 @@ class LightGBMClassifier(BaseClassifier):
         if not hasattr(self.model, 'feature_importances_'):
             return {}
         return dict(zip(self.feature_names, self.model.feature_importances_))
+    
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        return self.model.predict_proba(X)
 
 
 class TemporalClassifier(BaseClassifier):

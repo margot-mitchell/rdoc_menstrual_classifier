@@ -32,14 +32,14 @@ sys.path.append(os.path.join(project_root, 'src'))
 from src.utils.data_loader import load_config, load_and_split_data
 from src.utils.preprocessor import DataProcessor
 from src.utils.evaluator import ModelEvaluator
-from src.main.classification import (
+from src.classification.classification import (
     RandomForestClassifier,
     LogisticRegressionClassifier,
     SVMClassifier,
     XGBoostClassifier,
     LightGBMClassifier
 )
-from src.temporal_models.rule_based_prior import RuleBasedPrior
+from src.classification.rule_based_prior import RuleBasedPrior
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -68,22 +68,54 @@ def run_cross_validation(config: Dict[str, Any]) -> Dict[str, Any]:
     """Run cross-validation experiments."""
     logger.info("Starting cross-validation experiments...")
     
-    # Load and split data using the new function
+    # Load data
     data_config = config['data']
     hormone_data_path = data_config['hormone_data_path']
     
     logger.info(f"Loading data from: {hormone_data_path}")
-    X_train, X_test, y_train, y_test = load_and_split_data(
-        hormone_data_path, 
-        test_size=data_config['test_size'], 
-        random_state=data_config['random_state']
-    )
+    
+    # Load full data and limit to 10 samples per subject for realistic evaluation
+    full_data = pd.read_csv(hormone_data_path)
+    full_data['date'] = pd.to_datetime(full_data['date'])
+    
+    # Limit to 10 samples per subject
+    limited_data = []
+    for subject_id in full_data['subject_id'].unique():
+        subject_data = full_data[full_data['subject_id'] == subject_id]
+        limited_data.append(subject_data.head(10))
+    limited_data = pd.concat(limited_data, ignore_index=True)
+    
+    logger.info(f"Limited data size: {len(limited_data)} samples across {len(limited_data['subject_id'].unique())} subjects")
+    
+    # Create temporary file for data loader
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+        limited_data.to_csv(f.name, index=False)
+        temp_data_path = f.name
+    
+    try:
+        X_train, X_test, y_train, y_test = load_and_split_data(
+            temp_data_path, 
+            test_size=data_config['test_size'], 
+            random_state=data_config['random_state']
+        )
+    finally:
+        # Clean up temporary file
+        os.unlink(temp_data_path)
     
     # For cross-validation, we'll use the combined training and test data
     X = pd.concat([X_train, X_test], axis=0)
     y = pd.concat([y_train, y_test], axis=0)
     
     logger.info(f"Total data size for cross-validation: {len(X)}")
+    
+    # Check if we have enough data and classes for cross-validation
+    unique_classes = y.unique()
+    logger.info(f"Number of unique classes: {len(unique_classes)}")
+    logger.info(f"Class distribution: {y.value_counts().to_dict()}")
+    
+    if len(unique_classes) < 2:
+        logger.error("Not enough classes for cross-validation. Need at least 2 classes.")
+        return {}
     
     # Initialize evaluator
     evaluator = ModelEvaluator(config['output']['results_dir'])
@@ -99,12 +131,18 @@ def run_cross_validation(config: Dict[str, Any]) -> Dict[str, Any]:
     
     # Cross-validation settings
     cv_config = config['cross_validation']
-    cv_folds = cv_config['cv_folds']
+    cv_folds = min(cv_config['cv_folds'], len(unique_classes), len(X) // 2)  # Ensure reasonable number of folds
     cv_repeats = cv_config.get('cv_repeats', 1)
     scoring = cv_config['scoring']
     
-    # Initialize cross-validation
-    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=cv_config['random_state'])
+    logger.info(f"Using {cv_folds} folds for cross-validation")
+    
+    # Use GroupKFold to keep all samples from the same subject together
+    # This ensures the prior has access to each subject's complete period data
+    cv = GroupKFold(n_splits=cv_folds)
+    
+    # Get subject IDs for grouping
+    subject_ids = limited_data['subject_id'].values
     
     # Store results
     cv_results = {}
@@ -114,6 +152,11 @@ def run_cross_validation(config: Dict[str, Any]) -> Dict[str, Any]:
         
         try:
             # Train the model first
+            # For XGBoost, we need to reinitialize the classifier to avoid label encoder issues
+            if 'xgb' in name:
+                # Reinitialize XGBoost classifier for this fold to reset label encoder
+                classifier = XGBoostClassifier(config)
+            
             classifier.train(X, y)
             
             # Calculate additional metrics for each fold
@@ -127,40 +170,79 @@ def run_cross_validation(config: Dict[str, Any]) -> Dict[str, Any]:
             
             cv_scores = []
             
-            for train_idx, test_idx in cv.split(X, y):
+            for train_idx, test_idx in cv.split(X, y, groups=subject_ids):
                 X_train_fold, X_test_fold = X.iloc[train_idx], X.iloc[test_idx]
                 y_train_fold, y_test_fold = y.iloc[train_idx], y.iloc[test_idx]
                 
-                # Train on this fold using the custom classifier
-                classifier.train(X_train_fold, y_train_fold)
-                y_pred_fold = classifier.predict(X_test_fold)
+                # Check if we have enough data in this fold
+                if len(X_train_fold) < 2 or len(X_test_fold) < 1:
+                    logger.warning(f"Skipping fold with insufficient data: train={len(X_train_fold)}, test={len(X_test_fold)}")
+                    continue
                 
-                # Calculate metrics with proper error handling
-                fold_metrics['accuracy'].append(accuracy_score(y_test_fold, y_pred_fold))
+                # Check if we have at least 2 classes in training data
+                if len(y_train_fold.unique()) < 2:
+                    logger.warning(f"Skipping fold with insufficient classes in training: {y_train_fold.unique()}")
+                    continue
                 
-                # Handle precision warnings
                 try:
-                    precision = precision_score(y_test_fold, y_pred_fold, average='weighted', zero_division=0)
-                    fold_metrics['precision'].append(precision)
-                except:
-                    fold_metrics['precision'].append(0.0)
-                
-                fold_metrics['recall'].append(recall_score(y_test_fold, y_pred_fold, average='weighted'))
-                fold_metrics['f1'].append(f1_score(y_test_fold, y_pred_fold, average='weighted'))
-                
-                # ROC AUC (if binary classification)
-                if len(np.unique(y)) == 2:
+                    # Train on this fold
+                    # For XGBoost, we need to reinitialize the classifier to avoid label encoder issues
+                    if 'xgb' in name:
+                        # Reinitialize XGBoost classifier for this fold to reset label encoder
+                        fold_classifier = XGBoostClassifier(config)
+                    else:
+                        fold_classifier = classifier
+                    
+                    fold_classifier.train(X_train_fold, y_train_fold)
+                    
+                    # Get ML predictions
+                    y_pred_ml = fold_classifier.predict(X_test_fold)
+                    
+                    # Convert ML predictions to strings for consistency (true labels are strings)
+                    # Some classifiers return phase names, others return numeric indices
+                    if isinstance(y_pred_ml[0], str):
+                        y_pred_ml_strings = y_pred_ml
+                    else:
+                        phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
+                        y_pred_ml_strings = np.array([phases[pred] for pred in y_pred_ml])
+                    
+                    # Get ML probabilities
+                    y_probs_ml = fold_classifier.predict_proba(X_test_fold)
+                    
+                    # Calculate metrics with proper error handling
+                    fold_metrics['accuracy'].append(accuracy_score(y_test_fold, y_pred_ml_strings))
+                    
+                    # Handle precision warnings
                     try:
-                        y_pred_proba = classifier.predict_proba(X_test_fold)[:, 1]
-                        fold_metrics['roc_auc'].append(roc_auc_score(y_test_fold, y_pred_proba))
+                        precision = precision_score(y_test_fold, y_pred_ml_strings, average='weighted', zero_division=0)
+                        fold_metrics['precision'].append(precision)
                     except:
+                        fold_metrics['precision'].append(0.0)
+                    
+                    fold_metrics['recall'].append(recall_score(y_test_fold, y_pred_ml_strings, average='weighted'))
+                    fold_metrics['f1'].append(f1_score(y_test_fold, y_pred_ml_strings, average='weighted'))
+                    
+                    # ROC AUC (if binary classification)
+                    if len(np.unique(y)) == 2:
+                        try:
+                            y_pred_proba = fold_classifier.predict_proba(X_test_fold)[:, 1]
+                            fold_metrics['roc_auc'].append(roc_auc_score(y_test_fold, y_pred_proba))
+                        except:
+                            fold_metrics['roc_auc'].append(np.nan)
+                    else:
                         fold_metrics['roc_auc'].append(np.nan)
-                else:
-                    fold_metrics['roc_auc'].append(np.nan)
-                
-                # Store CV score
-                cv_scores.append(fold_metrics['accuracy'][-1])
+                    
+                    # Store CV score
+                    cv_scores.append(fold_metrics['accuracy'][-1])
+                    
+                except Exception as fold_error:
+                    logger.warning(f"Error in fold for {name}: {str(fold_error)}")
+                    continue
             
+            if not cv_scores:
+                logger.error(f"No successful folds for {name}")
+                continue
+                
             cv_scores = np.array(cv_scores)
             
             # Store results
@@ -169,17 +251,17 @@ def run_cross_validation(config: Dict[str, Any]) -> Dict[str, Any]:
                 'fold_metrics': fold_metrics,
                 'mean_cv_score': cv_scores.mean(),
                 'std_cv_score': cv_scores.std(),
-                'mean_accuracy': np.mean(fold_metrics['accuracy']),
-                'mean_precision': np.mean(fold_metrics['precision']),
-                'mean_recall': np.mean(fold_metrics['recall']),
-                'mean_f1': np.mean(fold_metrics['f1']),
-                'mean_roc_auc': np.nanmean(fold_metrics['roc_auc'])
+                'mean_accuracy': np.mean(fold_metrics['accuracy']) if fold_metrics['accuracy'] else 0.0,
+                'mean_precision': np.mean(fold_metrics['precision']) if fold_metrics['precision'] else 0.0,
+                'mean_recall': np.mean(fold_metrics['recall']) if fold_metrics['recall'] else 0.0,
+                'mean_f1': np.mean(fold_metrics['f1']) if fold_metrics['f1'] else 0.0,
+                'mean_roc_auc': np.nanmean(fold_metrics['roc_auc']) if fold_metrics['roc_auc'] else np.nan
             }
             
             logger.info(f"{name} - Mean CV Score: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
             
-            # Generate learning curves if configured
-            if config['output']['generate_learning_curves']:
+            # Generate learning curves if configured (skip for small datasets)
+            if config['output']['generate_learning_curves'] and len(X) > 50:
                 # Use sklearn-compatible wrapper for XGBoost, raw model for others
                 if 'xgb' in name and hasattr(classifier, 'get_sklearn_compatible_model'):
                     sklearn_model = classifier.get_sklearn_compatible_model()
@@ -187,8 +269,8 @@ def run_cross_validation(config: Dict[str, Any]) -> Dict[str, Any]:
                 else:
                     generate_learning_curves(classifier.model, X, y, name, config)
             
-            # Generate validation curves if configured
-            if config['output']['generate_validation_curves']:
+            # Generate validation curves if configured (skip for small datasets)
+            if config['output']['generate_validation_curves'] and len(X) > 50:
                 # Use sklearn-compatible wrapper for XGBoost, raw model for others
                 if 'xgb' in name and hasattr(classifier, 'get_sklearn_compatible_model'):
                     sklearn_model = classifier.get_sklearn_compatible_model()
@@ -377,33 +459,35 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
     # Load data
     data_config = config['data']
     hormone_data_path = data_config['hormone_data_path']
+    unlabeled_data_path = data_config.get('unlabeled_data_path', 'outputs/data/hormone_data_unlabeled.csv')
     survey_data_path = data_config['survey_data_path']
     period_data_path = data_config['period_data_path']
     
-    logger.info(f"Loading data from: {hormone_data_path}")
+    logger.info(f"Loading labeled data from: {hormone_data_path}")
+    logger.info(f"Loading unlabeled data from: {unlabeled_data_path}")
     
-    # Load original data for prior
-    original_data = pd.read_csv(hormone_data_path)
-    original_data['date'] = pd.to_datetime(original_data['date'])
+    # Load labeled data for metrics
+    labeled_data = pd.read_csv(hormone_data_path)
+    labeled_data['date'] = pd.to_datetime(labeled_data['date'])
     
-    # SIMULATE REAL-WORLD SCENARIO: Limit to 10 samples per subject
-    # This matches the deployment scenario where we only have 10 unlabeled samples per subject
-    logger.info("Simulating real-world scenario: Limiting to 10 samples per subject")
+    # Load unlabeled data for deployment-style prior predictions
+    unlabeled_data = pd.read_csv(unlabeled_data_path)
+    unlabeled_data['date'] = pd.to_datetime(unlabeled_data['date'])
     
-    limited_data = []
-    for subject_id in original_data['subject_id'].unique():
-        subject_data = original_data[original_data['subject_id'] == subject_id]
-        # Take first 10 samples per subject (or all if less than 10)
-        limited_subject_data = subject_data.head(10)
-        limited_data.append(limited_subject_data)
+    # For metrics: use full labeled data (no longer limiting to 10 samples per subject)
+    limited_labeled = labeled_data  # Use full dataset
     
-    original_data = pd.concat(limited_data, ignore_index=True)
-    logger.info(f"Limited data size: {len(original_data)} samples across {len(original_data['subject_id'].unique())} subjects")
+    # For deployment: use all samples from unlabeled data (or limit to 10 per subject)
+    limited_unlabeled = []
+    for subject_id in unlabeled_data['subject_id'].unique():
+        subject_data = unlabeled_data[unlabeled_data['subject_id'] == subject_id]
+        limited_unlabeled.append(subject_data.head(10))
+    limited_unlabeled = pd.concat(limited_unlabeled)
     
-    # Load preprocessed data for ML models (using limited data)
-    # We need to create a temporary file with limited data for the data loader
+    # Prior predictions and metrics on labeled data
+    # Load preprocessed data for ML models (using limited labeled data)
     with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
-        original_data.to_csv(f.name, index=False)
+        limited_labeled.to_csv(f.name, index=False)
         temp_data_path = f.name
     
     try:
@@ -448,7 +532,7 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
     cv = GroupKFold(n_splits=cv_folds)
     
     # Get subject IDs for grouping
-    subject_ids = original_data['subject_id'].values
+    subject_ids = limited_labeled['subject_id'].values
     
     # Store results
     prior_results = {}
@@ -458,6 +542,11 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
         
         try:
             # Train the model first
+            # For XGBoost, we need to reinitialize the classifier to avoid label encoder issues
+            if 'xgb' in name:
+                # Reinitialize XGBoost classifier for this fold to reset label encoder
+                classifier = XGBoostClassifier(config)
+            
             classifier.train(X, y)
             
             # Calculate metrics for each fold
@@ -487,70 +576,114 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
                 y_train_fold, y_test_fold = y.iloc[train_idx], y.iloc[test_idx]
                 
                 # Get corresponding original data for this fold
-                original_test_fold = original_data.iloc[test_idx]
+                original_test_fold = limited_labeled.iloc[test_idx]
                 
-                # Train on this fold
-                classifier.train(X_train_fold, y_train_fold)
+                # Check if we have enough data in this fold
+                if len(X_train_fold) < 2 or len(X_test_fold) < 1:
+                    logger.warning(f"Skipping fold with insufficient data: train={len(X_train_fold)}, test={len(X_test_fold)}")
+                    continue
                 
-                # Get ML predictions
-                y_pred_ml = classifier.predict(X_test_fold)
+                # Check if we have at least 2 classes in training data
+                if len(y_train_fold.unique()) < 2:
+                    logger.warning(f"Skipping fold with insufficient classes in training: {y_train_fold.unique()}")
+                    continue
                 
-                # Get prior predictions using original data
-                y_pred_prior = prior.predict_phases(original_test_fold)
-                
-                # Combine predictions
-                y_pred_combined = combine_predictions(
-                    y_pred_ml, y_pred_prior, prior_weight
-                )
-                
-                # Collect predictions for confusion matrices
-                all_true_labels.extend(y_test_fold.values)
-                all_ml_predictions.extend(y_pred_ml)
-                all_prior_predictions.extend(y_pred_prior)
-                all_combined_predictions.extend(y_pred_combined)
-                
-                # Calculate metrics for ML-only
-                fold_metrics['ml_only_accuracy'].append(accuracy_score(y_test_fold, y_pred_ml))
-                fold_metrics['ml_only_precision'].append(
-                    precision_score(y_test_fold, y_pred_ml, average='weighted', zero_division=0)
-                )
-                fold_metrics['ml_only_recall'].append(
-                    recall_score(y_test_fold, y_pred_ml, average='weighted')
-                )
-                fold_metrics['ml_only_f1'].append(
-                    f1_score(y_test_fold, y_pred_ml, average='weighted')
-                )
-                
-                # Calculate metrics for prior-only
-                fold_metrics['prior_only_accuracy'].append(accuracy_score(original_test_fold['phase'].values, y_pred_prior))
-                fold_metrics['prior_only_precision'].append(
-                    precision_score(original_test_fold['phase'].values, y_pred_prior, average='weighted', zero_division=0)
-                )
-                fold_metrics['prior_only_recall'].append(
-                    recall_score(original_test_fold['phase'].values, y_pred_prior, average='weighted')
-                )
-                fold_metrics['prior_only_f1'].append(
-                    f1_score(original_test_fold['phase'].values, y_pred_prior, average='weighted')
-                )
-                
-                # Calculate metrics for combined
-                fold_metrics['combined_accuracy'].append(accuracy_score(y_test_fold, y_pred_combined))
-                fold_metrics['combined_precision'].append(
-                    precision_score(y_test_fold, y_pred_combined, average='weighted', zero_division=0)
-                )
-                fold_metrics['combined_recall'].append(
-                    recall_score(y_test_fold, y_pred_combined, average='weighted')
-                )
-                fold_metrics['combined_f1'].append(
-                    f1_score(y_test_fold, y_pred_combined, average='weighted')
-                )
+                try:
+                    # Train on this fold
+                    # For XGBoost, we need to reinitialize the classifier to avoid label encoder issues
+                    if 'xgb' in name:
+                        # Reinitialize XGBoost classifier for this fold to reset label encoder
+                        fold_classifier = XGBoostClassifier(config)
+                    else:
+                        fold_classifier = classifier
+                    
+                    fold_classifier.train(X_train_fold, y_train_fold)
+                    
+                    # Get ML predictions
+                    y_pred_ml = fold_classifier.predict(X_test_fold)
+                    
+                    # Convert ML predictions to strings for consistency (true labels are strings)
+                    # Some classifiers return phase names, others return numeric indices
+                    if isinstance(y_pred_ml[0], str):
+                        y_pred_ml_strings = y_pred_ml
+                    else:
+                        phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
+                        y_pred_ml_strings = np.array([phases[pred] for pred in y_pred_ml])
+                    
+                    # Get ML probabilities
+                    y_probs_ml = fold_classifier.predict_proba(X_test_fold)
+                    
+                    # Get prior predictions using original data
+                    y_pred_prior = prior.predict_phases(original_test_fold)
+                    
+                    # Get prior probabilities
+                    y_probs_prior = prior.get_prior_probabilities(original_test_fold)
+                    
+                    # Combine predictions using probabilities
+                    y_pred_combined = combine_predictions_with_probs(
+                        y_probs_ml, y_probs_prior, prior_weight, fold_classifier
+                    )
+                    
+                    # Collect predictions for confusion matrices
+                    all_true_labels.extend(y_test_fold.values)
+                    all_ml_predictions.extend(y_pred_ml_strings)
+                    all_prior_predictions.extend(y_pred_prior)
+                    all_combined_predictions.extend(y_pred_combined)
+                    
+                    # Calculate metrics for ML-only
+                    fold_metrics['ml_only_accuracy'].append(accuracy_score(y_test_fold, y_pred_ml_strings))
+                    fold_metrics['ml_only_precision'].append(
+                        precision_score(y_test_fold, y_pred_ml_strings, average='weighted', zero_division=0)
+                    )
+                    fold_metrics['ml_only_recall'].append(
+                        recall_score(y_test_fold, y_pred_ml_strings, average='weighted')
+                    )
+                    fold_metrics['ml_only_f1'].append(
+                        f1_score(y_test_fold, y_pred_ml_strings, average='weighted')
+                    )
+                    
+                    # Calculate metrics for prior-only
+                    fold_metrics['prior_only_accuracy'].append(accuracy_score(original_test_fold['phase'].values, y_pred_prior))
+                    fold_metrics['prior_only_precision'].append(
+                        precision_score(original_test_fold['phase'].values, y_pred_prior, average='weighted', zero_division=0)
+                    )
+                    fold_metrics['prior_only_recall'].append(
+                        recall_score(original_test_fold['phase'].values, y_pred_prior, average='weighted')
+                    )
+                    fold_metrics['prior_only_f1'].append(
+                        f1_score(original_test_fold['phase'].values, y_pred_prior, average='weighted')
+                    )
+                    
+                    # Calculate metrics for combined
+                    fold_metrics['combined_accuracy'].append(accuracy_score(y_test_fold, y_pred_combined))
+                    fold_metrics['combined_precision'].append(
+                        precision_score(y_test_fold, y_pred_combined, average='weighted', zero_division=0)
+                    )
+                    fold_metrics['combined_recall'].append(
+                        recall_score(y_test_fold, y_pred_combined, average='weighted')
+                    )
+                    fold_metrics['combined_f1'].append(
+                        f1_score(y_test_fold, y_pred_combined, average='weighted')
+                    )
+                    
+                except Exception as fold_error:
+                    logger.warning(f"Error in fold for {name}: {str(fold_error)}")
+                    continue
+            
+            if not fold_metrics['ml_only_accuracy']:
+                logger.error(f"No successful folds for {name}")
+                continue
             
             # Generate confusion matrices
             phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
             model_results_dir = get_model_results_dir(config['output']['results_dir'], name)
             
+            # All predictions are already strings, so no conversion needed for confusion matrices
+            all_true_labels_strings = all_true_labels
+            all_ml_predictions_strings = all_ml_predictions
+            
             # ML-only confusion matrix
-            cm_ml = confusion_matrix(all_true_labels, all_ml_predictions, labels=phases)
+            cm_ml = confusion_matrix(all_true_labels_strings, all_ml_predictions_strings, labels=phases)
             plt.figure(figsize=(8, 6))
             sns.heatmap(cm_ml, annot=True, fmt='d', cmap='Blues', xticklabels=phases, yticklabels=phases)
             plt.xlabel('Predicted Phase')
@@ -567,7 +700,7 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
                 prior_results_dir = os.path.join(config['output']['results_dir'], 'prior')
                 os.makedirs(prior_results_dir, exist_ok=True)
                 
-                cm_prior = confusion_matrix(all_true_labels, all_prior_predictions, labels=phases)
+                cm_prior = confusion_matrix(all_true_labels_strings, all_prior_predictions, labels=phases)
                 plt.figure(figsize=(8, 6))
                 sns.heatmap(cm_prior, annot=True, fmt='d', cmap='Blues', xticklabels=phases, yticklabels=phases)
                 plt.xlabel('Predicted Phase')
@@ -580,7 +713,7 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
                 logger.info(f"Prior-only confusion matrix saved to {prior_cm_path}")
             
             # Combined confusion matrix
-            cm_combined = confusion_matrix(all_true_labels, all_combined_predictions, labels=phases)
+            cm_combined = confusion_matrix(all_true_labels_strings, all_combined_predictions, labels=phases)
             plt.figure(figsize=(8, 6))
             sns.heatmap(cm_combined, annot=True, fmt='d', cmap='Blues', xticklabels=phases, yticklabels=phases)
             plt.xlabel('Predicted Phase')
@@ -624,6 +757,24 @@ def run_prior_testing(config: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as e:
             logger.error(f"Error in prior testing for {name}: {str(e)}")
             continue
+    
+    # Prior predictions on unlabeled data (for deployment, no metrics)
+    logger.info("\nGenerating deployment-style prior predictions on unlabeled data...")
+    
+    # Initialize prior for unlabeled data
+    prior_unlabeled = RuleBasedPrior(config)
+    prior_unlabeled.load_data()
+    
+    # Get prior predictions for unlabeled data
+    deployment_predictions = prior_unlabeled.predict_phases(limited_unlabeled)
+    
+    # Save deployment predictions
+    deployment_results = limited_unlabeled.copy()
+    deployment_results['prior_prediction'] = deployment_predictions
+    
+    deployment_path = os.path.join(config['output']['results_dir'], 'deployment_prior_predictions.csv')
+    deployment_results.to_csv(deployment_path, index=False)
+    logger.info(f"Deployment prior predictions saved to {deployment_path}")
     
     # Save prior testing results
     save_prior_results(prior_results, config)
@@ -677,6 +828,74 @@ def save_prior_results(prior_results: Dict[str, Any], config: Dict[str, Any]):
     results_df.to_csv(output_path, index=False)
     
     logger.info(f"Overall prior testing results saved to {output_path}")
+
+
+def combine_predictions_with_probs(ml_probs: np.ndarray, prior_probs: np.ndarray, prior_weight: float = 0.3, classifier=None) -> np.ndarray:
+    """
+    Combine ML and prior predictions using probability vectors with perfect prior logic.
+    
+    The prior gets 100% weight for phases it's known to be perfect at (perimenstruation),
+    and the configured weight for other phases.
+    
+    Args:
+        ml_probs: ML model probability vectors (n_samples, n_classes)
+        prior_probs: Prior probability vectors (n_samples, n_classes)
+        prior_weight: Weight for prior predictions (0.0 to 1.0) for non-perfect phases
+        classifier: The trained classifier (to get class order)
+        
+    Returns:
+        np.ndarray: Combined predictions
+    """
+    # Define phase order (must match the order used in both ML and prior)
+    phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
+    
+    # Phases where prior has perfect accuracy (should get 100% weight)
+    perfect_prior_phases = ['perimenstruation']
+    
+    # Dynamically get ML model class order
+    if classifier is not None:
+        # For XGBoost, use label encoder classes
+        if hasattr(classifier, 'label_encoder') and classifier.label_encoder is not None:
+            ml_phase_order = list(classifier.label_encoder.classes_)
+            ml_to_prior_mapping = [phases.index(phase) for phase in ml_phase_order]
+            ml_probs_reordered = ml_probs[:, ml_to_prior_mapping]
+        # For other models, try to use model.classes_
+        elif hasattr(classifier, 'model') and hasattr(classifier.model, 'classes_'):
+            ml_phase_order = list(classifier.model.classes_)
+            ml_to_prior_mapping = [phases.index(phase) for phase in ml_phase_order]
+            ml_probs_reordered = ml_probs[:, ml_to_prior_mapping]
+        else:
+            ml_probs_reordered = ml_probs  # fallback: assume already in correct order
+    else:
+        ml_probs_reordered = ml_probs  # fallback: assume already in correct order
+    
+    # Get predictions from probabilities
+    ml_predictions = np.array([phases[np.argmax(probs)] for probs in ml_probs_reordered])
+    prior_predictions = np.array([phases[np.argmax(probs)] for probs in prior_probs])
+    
+    # Combine predictions using perfect prior logic
+    combined_predictions = []
+    
+    for i in range(len(ml_predictions)):
+        ml_pred = ml_predictions[i]
+        prior_pred = prior_predictions[i]
+        
+        # If prior predicts a phase it's perfect at, use prior prediction
+        if prior_pred in perfect_prior_phases:
+            combined_predictions.append(prior_pred)
+        # If ML predicts a phase the prior is perfect at, use prior prediction
+        elif ml_pred in perfect_prior_phases:
+            combined_predictions.append(prior_pred)
+        # Otherwise, use weighted combination of probabilities
+        else:
+            # Combine probability vectors
+            combined_probs = (1 - prior_weight) * ml_probs_reordered[i] + prior_weight * prior_probs[i]
+            
+            # Get final prediction
+            combined_pred = phases[np.argmax(combined_probs)]
+            combined_predictions.append(combined_pred)
+    
+    return np.array(combined_predictions)
 
 
 def combine_predictions(ml_predictions: np.ndarray, prior_predictions: np.ndarray, prior_weight: float = 0.3) -> np.ndarray:

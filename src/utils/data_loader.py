@@ -67,7 +67,7 @@ class DataPreprocessor:
         # Add prior features if enabled
         if add_prior and self.use_prior:
             try:
-                from src.temporal_models.rule_based_prior import RuleBasedPrior
+                from src.classification.rule_based_prior import RuleBasedPrior
                 rule_prior = RuleBasedPrior(self.prior_config)
                 rule_prior.load_data()
                 

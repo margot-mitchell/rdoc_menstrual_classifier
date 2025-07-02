@@ -17,7 +17,7 @@ sys.path.append(project_root)
 sys.path.append(os.path.join(project_root, 'src'))
 
 from src.utils.data_loader import load_config
-from src.temporal_models.rule_based_prior import RuleBasedPrior
+from src.classification.rule_based_prior import RuleBasedPrior
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)

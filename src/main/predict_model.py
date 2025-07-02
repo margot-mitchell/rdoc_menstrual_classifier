@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import json
 import glob
+from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
 
 # Add project root to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,7 +23,7 @@ sys.path.append(os.path.join(project_root, 'src'))
 
 from src.utils.data_loader import load_config, preprocess_unlabeled_data_with_prior, preprocess_unlabeled_data, DataPreprocessor
 from src.utils.model_utils import load_model_bundle, get_bundle_info, list_available_bundles
-from src.temporal_models.rule_based_prior import RuleBasedPrior
+from src.classification.rule_based_prior import RuleBasedPrior
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -63,6 +64,55 @@ def load_and_preprocess_unlabeled_data(data_path: str, config: Dict[str, Any], m
     
     logger.info(f"Preprocessed data shape: {X.shape}")
     return X
+
+
+def combine_predictions_with_perfect_prior(ml_predictions: np.ndarray, prior_predictions: np.ndarray, 
+                                         ml_probs: np.ndarray, prior_probs: np.ndarray, 
+                                         prior_weight: float = 0.3) -> np.ndarray:
+    """
+    Combine ML and prior predictions using smart weighted voting.
+    
+    The prior gets 100% weight for phases it's known to be perfect at (perimenstruation),
+    and the configured weight for other phases.
+    
+    Args:
+        ml_predictions: Array of ML predictions
+        prior_predictions: Array of prior predictions
+        ml_probs: ML probability vectors (n_samples, n_classes)
+        prior_probs: Prior probability vectors (n_samples, n_classes)
+        prior_weight: Weight for prior predictions (0.0 to 1.0) for non-perfect phases
+        
+    Returns:
+        np.ndarray: Combined predictions
+    """
+    # Define phase order
+    phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
+    
+    # Phases where prior has perfect accuracy (should get 100% weight)
+    perfect_prior_phases = ['perimenstruation']
+    
+    combined_predictions = []
+    
+    for i in range(len(ml_predictions)):
+        ml_pred = ml_predictions[i]
+        prior_pred = prior_predictions[i]
+        
+        # If prior predicts a phase it's perfect at, use prior prediction
+        if prior_pred in perfect_prior_phases:
+            combined_predictions.append(prior_pred)
+        # If ML predicts a phase the prior is perfect at, use prior prediction
+        elif ml_pred in perfect_prior_phases:
+            combined_predictions.append(prior_pred)
+        # Otherwise, use weighted combination of probabilities
+        else:
+            # Combine probability vectors
+            combined_probs = (1 - prior_weight) * ml_probs[i] + prior_weight * prior_probs[i]
+            
+            # Get final prediction
+            combined_pred = phases[np.argmax(combined_probs)]
+            combined_predictions.append(combined_pred)
+    
+    return np.array(combined_predictions)
 
 
 def make_predictions(model_path: str, X: pd.DataFrame, original_data: pd.DataFrame, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -149,17 +199,13 @@ def make_predictions(model_path: str, X: pd.DataFrame, original_data: pd.DataFra
         prior_predictions = rule_prior.predict_phases(original_data)
         prior_probs = rule_prior.get_prior_probabilities(original_data)
         
-        # Combine predictions (simple ensemble for now)
+        # Combine predictions using perfect prior logic
         prior_weight = config.get('models', {}).get('temporal', {}).get('prior_weight', 0.3)
-        combined_predictions = []
+        combined_predictions = combine_predictions_with_perfect_prior(
+            predictions, prior_predictions, probabilities, prior_probs, prior_weight
+        )
         
-        for i in range(len(predictions)):
-            if np.random.random() < prior_weight:
-                combined_predictions.append(prior_predictions[i])
-            else:
-                combined_predictions.append(predictions[i])
-        
-        predictions = np.array(combined_predictions)
+        predictions = combined_predictions
         
         # Combine probabilities if available
         if probabilities is not None:
@@ -445,6 +491,10 @@ def save_predictions(predictions: np.ndarray, original_data: pd.DataFrame,
     # Generate prediction plots
     if output_config['save_prediction_plots']:
         generate_prediction_plots(predictions_df, results, config, model_name, model_dir)
+    
+    # Generate confusion matrix by matching with labeled data
+    if output_config.get('generate_confusion_matrix', True):
+        generate_confusion_matrix(predictions_df, config, model_name, model_dir)
 
 
 def generate_prediction_summary(predictions_df: pd.DataFrame, results: Dict[str, Any], config: Dict[str, Any], model_name: str = None, model_dir: str = None) -> None:
@@ -527,6 +577,129 @@ def generate_prediction_plots(predictions_df: pd.DataFrame, results: Dict[str, A
         plt.savefig(conf_path, dpi=300, bbox_inches='tight')
         plt.close()
         logger.info(f"Confidence distribution plot saved to: {conf_path}")
+
+
+def generate_confusion_matrix(predictions_df: pd.DataFrame, config: Dict[str, Any], model_name: str = None, model_dir: str = None) -> None:
+    """
+    Generate confusion matrix by matching predictions on unlabeled data with true phases from labeled data.
+    Matches samples by subject_id and date.
+    """
+    try:
+        # Load labeled data to get true phases
+        labeled_data_path = config['data'].get('hormone_data_path', 'outputs/data/full_hormone_data_labeled.csv')
+        labeled_data = pd.read_csv(labeled_data_path)
+        labeled_data['date'] = pd.to_datetime(labeled_data['date'])
+        
+        # Ensure predictions_df has date as datetime
+        predictions_df['date'] = pd.to_datetime(predictions_df['date'])
+        
+        # Merge predictions with labeled data on subject_id and date
+        merged_data = predictions_df.merge(
+            labeled_data[['subject_id', 'date', 'phase']], 
+            on=['subject_id', 'date'], 
+            how='inner',
+            suffixes=('', '_true')
+        )
+        
+        if len(merged_data) == 0:
+            logger.warning(f"No matching samples found between unlabeled predictions and labeled data for {model_name}")
+            return
+        
+        logger.info(f"Found {len(merged_data)} matching samples for confusion matrix generation")
+        
+        # Get true and predicted phases
+        y_true = merged_data['phase']
+        y_pred = merged_data['predicted_phase']
+        
+        # Handle XGBoost numeric predictions by converting to string phase names
+        if y_pred.dtype in ['int64', 'int32', 'float64', 'float32'] or any(isinstance(x, (int, float)) for x in y_pred):
+            logger.info(f"Converting numeric predictions to string phase names for {model_name}")
+            
+            # Define the mapping from numeric indices to phase names
+            # This should match the order used in the model's label encoder
+            phase_mapping = {
+                0: 'early_luteal',
+                1: 'mid_follicular', 
+                2: 'mid_late_luteal',
+                3: 'perimenstruation',
+                4: 'periovulation'
+            }
+            
+            # Convert numeric predictions to string phase names
+            y_pred_strings = []
+            for pred in y_pred:
+                if pred in phase_mapping:
+                    y_pred_strings.append(phase_mapping[pred])
+                else:
+                    # Fallback for unexpected values
+                    logger.warning(f"Unexpected prediction value: {pred}, using 'unknown'")
+                    y_pred_strings.append('unknown')
+            
+            y_pred = pd.Series(y_pred_strings)
+        
+        # Define phase order for consistent confusion matrix
+        phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
+        
+        # Generate confusion matrix
+        cm = confusion_matrix(y_true, y_pred, labels=phases)
+        
+        # Calculate metrics
+        accuracy = accuracy_score(y_true, y_pred)
+        precision = precision_score(y_true, y_pred, average='weighted', zero_division=0)
+        recall = recall_score(y_true, y_pred, average='weighted')
+        f1 = f1_score(y_true, y_pred, average='weighted')
+        
+        # Create confusion matrix plot
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                   xticklabels=phases, yticklabels=phases)
+        plt.xlabel('Predicted Phase')
+        plt.ylabel('True Phase')
+        plt.title(f'{model_name} - Confusion Matrix\nAccuracy: {accuracy:.3f}, Precision: {precision:.3f}, Recall: {recall:.3f}, F1: {f1:.3f}')
+        plt.tight_layout()
+        
+        # Save confusion matrix plot
+        if model_dir:
+            cm_path = os.path.join(model_dir, 'confusion_matrix.png')
+        else:
+            suffix = f"_{model_name}" if model_name else ""
+            cm_path = os.path.join(config['output']['predictions_dir'], f'confusion_matrix{suffix}.png')
+        
+        plt.savefig(cm_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        logger.info(f"Confusion matrix saved to: {cm_path}")
+        
+        # Save confusion matrix metrics
+        cm_metrics = {
+            'accuracy': float(accuracy),
+            'precision': float(precision),
+            'recall': float(recall),
+            'f1_score': float(f1),
+            'total_samples': len(merged_data),
+            'confusion_matrix': cm.tolist(),
+            'phase_labels': phases
+        }
+        
+        if model_dir:
+            metrics_path = os.path.join(model_dir, 'confusion_matrix_metrics.json')
+        else:
+            suffix = f"_{model_name}" if model_name else ""
+            metrics_path = os.path.join(config['output']['predictions_dir'], f'confusion_matrix_metrics{suffix}.json')
+        
+        with open(metrics_path, 'w') as f:
+            json.dump(cm_metrics, f, indent=2, default=str)
+        logger.info(f"Confusion matrix metrics saved to: {metrics_path}")
+        
+        # Print metrics
+        print(f"\n=== CONFUSION MATRIX METRICS ({model_name}) ===")
+        print(f"Total matched samples: {len(merged_data)}")
+        print(f"Accuracy: {accuracy:.3f}")
+        print(f"Precision: {precision:.3f}")
+        print(f"Recall: {recall:.3f}")
+        print(f"F1-Score: {f1:.3f}")
+        
+    except Exception as e:
+        logger.error(f"Error generating confusion matrix for {model_name}: {str(e)}")
 
 
 def main():

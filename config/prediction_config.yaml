@@ -4,9 +4,10 @@
 # Data settings
 data:
   unlabeled_data_path: "outputs/data/hormone_data_unlabeled.csv"
+  hormone_data_path: "outputs/data/full_hormone_data_labeled.csv"  # For confusion matrix generation
   period_data_path: "outputs/data/period_sleep_data.csv"
   survey_data_path: "outputs/data/survey_responses.csv"
-  model_path: "outputs/models/random_forest_bundle.joblib"  # Path to trained model bundle
+  model_path: "outputs/models/random_forest_with_prior_bundle.joblib"  # Path to trained model bundle with prior
 
 # Feature engineering (must match training configuration)
 features:

@@ -4,6 +4,7 @@
 # Data settings
 data:
   hormone_data_path: "outputs/data/full_hormone_data_labeled.csv"
+  unlabeled_data_path: "outputs/data/hormone_data_unlabeled.csv"
   survey_data_path: "outputs/data/survey_responses.csv"
   period_data_path: "outputs/data/period_sleep_data.csv"
   test_size: 0.2
@@ -14,7 +15,7 @@ data:
 prior_testing:
   enabled: true  # Set to false to run only pure ML cross-validation
   test_both: true  # Set to true to run both ML-only and ML+prior evaluations
-  prior_weight: 0.7  # Weight for prior in combined predictions
+  prior_weight: 0.3  # Weight for prior in combined predictions
 
 # Feature engineering
 features:

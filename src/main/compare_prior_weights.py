@@ -12,6 +12,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Dict, Any, List, Tuple
+from sklearn.metrics import accuracy_score
 
 # Add project root to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,13 +20,62 @@ sys.path.append(project_root)
 sys.path.append(os.path.join(project_root, 'src'))
 
 from src.utils.data_loader import load_config, preprocess_unlabeled_data
-from src.utils.model_utils import load_model, predict_with_model, predict_proba_with_model, get_model_info
-from src.temporal_models.rule_based_prior import RuleBasedPrior
+from src.utils.model_utils import load_model, get_bundle_info, load_model_bundle
+from src.classification.rule_based_prior import RuleBasedPrior
 from src.utils.evaluator import ModelEvaluator
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def combine_predictions_with_perfect_prior(ml_predictions: np.ndarray, prior_predictions: np.ndarray, 
+                                         ml_probs: np.ndarray, prior_probs: np.ndarray, 
+                                         prior_weight: float = 0.3) -> np.ndarray:
+    """
+    Combine ML and prior predictions using smart weighted voting.
+    
+    The prior gets 100% weight for phases it's known to be perfect at (perimenstruation),
+    and the configured weight for other phases.
+    
+    Args:
+        ml_predictions: Array of ML predictions
+        prior_predictions: Array of prior predictions
+        ml_probs: ML probability vectors (n_samples, n_classes)
+        prior_probs: Prior probability vectors (n_samples, n_classes)
+        prior_weight: Weight for prior predictions (0.0 to 1.0) for non-perfect phases
+        
+    Returns:
+        np.ndarray: Combined predictions
+    """
+    # Define phase order
+    phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
+    
+    # Phases where prior has perfect accuracy (should get 100% weight)
+    perfect_prior_phases = ['perimenstruation']
+    
+    combined_predictions = []
+    
+    for i in range(len(ml_predictions)):
+        ml_pred = ml_predictions[i]
+        prior_pred = prior_predictions[i]
+        
+        # If prior predicts a phase it's perfect at, use prior prediction
+        if prior_pred in perfect_prior_phases:
+            combined_predictions.append(prior_pred)
+        # If ML predicts a phase the prior is perfect at, use prior prediction
+        elif ml_pred in perfect_prior_phases:
+            combined_predictions.append(prior_pred)
+        # Otherwise, use weighted combination of probabilities
+        else:
+            # Combine probability vectors
+            combined_probs = (1 - prior_weight) * ml_probs[i] + prior_weight * prior_probs[i]
+            
+            # Get final prediction
+            combined_pred = phases[np.argmax(combined_probs)]
+            combined_predictions.append(combined_pred)
+    
+    return np.array(combined_predictions)
 
 
 def evaluate_prior_weight(model_path: str, X: pd.DataFrame, original_data: pd.DataFrame, 
@@ -46,15 +96,17 @@ def evaluate_prior_weight(model_path: str, X: pd.DataFrame, original_data: pd.Da
     logger.info(f"Testing prior weight: {prior_weight}")
     
     # Get model info
-    model_info = get_model_info(model_path)
+    model_bundle = load_model_bundle(model_path)
+    model_info = get_bundle_info(model_bundle)
     
-    # Extract original features for model prediction
-    original_features = ['estradiol', 'progesterone', 'testosterone']
-    X_for_model = X[original_features]
+    # Use all preprocessed features for model prediction
+    X_for_model = X
     
     # Make base model predictions
-    base_predictions = predict_with_model(model_path, X_for_model)
-    base_probabilities = predict_proba_with_model(model_path, X_for_model)
+    base_predictions = model_bundle.predict(X_for_model)
+    
+    # Use ModelBundle.predict_proba instead of deprecated function
+    base_probabilities = model_bundle.predict_proba(X_for_model)
     
     # Initialize rule-based prior
     rule_prior = RuleBasedPrior(config)
@@ -74,33 +126,41 @@ def evaluate_prior_weight(model_path: str, X: pd.DataFrame, original_data: pd.Da
         final_predictions = prior_predictions
         final_probabilities = prior_probs
     else:
-        # Weighted combination
-        combined_predictions = []
-        combined_probs = []
+        # Combined using perfect prior logic
+        final_predictions = combine_predictions_with_perfect_prior(
+            base_predictions, prior_predictions, base_probabilities, prior_probs, prior_weight
+        )
         
+        # Calculate confidence scores from combined probabilities
+        phases = ['perimenstruation', 'mid_follicular', 'periovulation', 'early_luteal', 'mid_late_luteal']
+        perfect_prior_phases = ['perimenstruation']
+        
+        confidence_scores = []
         for i in range(len(base_predictions)):
-            # Simple voting scheme for predictions
-            if np.random.random() < prior_weight:
-                combined_predictions.append(prior_predictions[i])
-            else:
-                combined_predictions.append(base_predictions[i])
+            ml_pred = base_predictions[i]
+            prior_pred = prior_predictions[i]
             
-            # Weighted average for probabilities
-            combined_prob = (1 - prior_weight) * base_probabilities[i] + prior_weight * prior_probs[i]
-            combined_probs.append(combined_prob)
+            if prior_pred in perfect_prior_phases or ml_pred in perfect_prior_phases:
+                # Use prior confidence for perfect phases
+                confidence_scores.append(np.max(prior_probs[i]))
+            else:
+                # Use combined confidence for other phases
+                combined_probs = (1 - prior_weight) * base_probabilities[i] + prior_weight * prior_probs[i]
+                confidence_scores.append(np.max(combined_probs))
         
-        final_predictions = np.array(combined_predictions)
-        final_probabilities = np.array(combined_probs)
-    
-    # Calculate confidence scores
-    confidence_scores = np.max(final_probabilities, axis=1)
+        confidence_scores = np.array(confidence_scores)
     
     # Calculate basic metrics (assuming we have ground truth for evaluation)
     # For now, we'll calculate prediction distribution and confidence metrics
     prediction_distribution = pd.Series(final_predictions).value_counts().to_dict()
     mean_confidence = np.mean(confidence_scores)
     high_confidence_count = np.sum(confidence_scores > 0.7)
-    
+
+    # NEW: Calculate accuracy if ground truth is available
+    accuracy = None
+    if 'phase' in original_data.columns:
+        accuracy = accuracy_score(original_data['phase'], final_predictions)
+
     results = {
         'prior_weight': prior_weight,
         'prediction_distribution': prediction_distribution,
@@ -110,7 +170,8 @@ def evaluate_prior_weight(model_path: str, X: pd.DataFrame, original_data: pd.Da
         'base_predictions': base_predictions,
         'prior_predictions': prior_predictions,
         'final_predictions': final_predictions,
-        'confidence_scores': confidence_scores
+        'confidence_scores': confidence_scores,
+        'accuracy': accuracy  # NEW: add accuracy to results
     }
     
     return results
@@ -131,7 +192,11 @@ def compare_prior_weights(config: Dict[str, Any]) -> pd.DataFrame:
     # Load and preprocess data
     data_path = config['data']['unlabeled_data_path']
     original_data = pd.read_csv(data_path)
-    X = preprocess_unlabeled_data(original_data)
+    
+    # Load the model bundle to get the preprocessor
+    model_bundle = load_model_bundle(config['data']['model_path'])
+    preprocessor = model_bundle.preprocessor
+    X = preprocess_unlabeled_data(original_data, preprocessor)
     
     # Define prior weights to test
     prior_weights = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
@@ -156,6 +221,18 @@ def compare_prior_weights(config: Dict[str, Any]) -> pd.DataFrame:
     # Create comparison DataFrame
     comparison_df = pd.DataFrame(results_list)
     
+    # NEW: Find best accuracy if available
+    if 'accuracy' in comparison_df.columns and comparison_df['accuracy'].notnull().any():
+        best_acc_idx = comparison_df['accuracy'].idxmax()
+        best_acc_weight = comparison_df.loc[best_acc_idx, 'prior_weight']
+        best_acc_score = comparison_df.loc[best_acc_idx, 'accuracy']
+        logger.info(f"Best accuracy: {best_acc_score:.4f} at prior weight {best_acc_weight}")
+        comparison_df.attrs['best_accuracy'] = best_acc_score
+        comparison_df.attrs['best_accuracy_weight'] = best_acc_weight
+    else:
+        comparison_df.attrs['best_accuracy'] = None
+        comparison_df.attrs['best_accuracy_weight'] = None
+
     return comparison_df
 
 
@@ -260,13 +337,25 @@ def save_comparison_results(comparison_df: pd.DataFrame, output_dir: str) -> Non
         best_high_conf_weight = comparison_df.loc[best_high_conf_idx, 'prior_weight']
         best_high_conf_count = comparison_df.loc[best_high_conf_idx, 'high_confidence_count']
         f.write(f"Most high-confidence predictions: {best_high_conf_weight:.1f} (count: {best_high_conf_count})\n")
+
+        # NEW: Best accuracy
+        if 'accuracy' in comparison_df.columns and comparison_df['accuracy'].notnull().any():
+            best_acc_idx = comparison_df['accuracy'].idxmax()
+            best_acc_weight = comparison_df.loc[best_acc_idx, 'prior_weight']
+            best_acc_score = comparison_df.loc[best_acc_idx, 'accuracy']
+            f.write(f"Best accuracy: {best_acc_weight:.1f} (accuracy: {best_acc_score:.4f})\n")
+        else:
+            f.write("No accuracy calculated (no ground truth labels).\n")
         
         f.write("\nDetailed results:\n")
         f.write("-" * 15 + "\n")
         for _, row in comparison_df.iterrows():
             f.write(f"Weight {row['prior_weight']:.1f}: ")
             f.write(f"Confidence={row['mean_confidence']:.3f}, ")
-            f.write(f"High-conf={row['high_confidence_count']}\n")
+            f.write(f"High-conf={row['high_confidence_count']}")
+            if 'accuracy' in row and row['accuracy'] is not None:
+                f.write(f", Accuracy={row['accuracy']:.4f}")
+            f.write("\n")
     
     logger.info(f"Summary saved to: {summary_path}")
 
@@ -293,6 +382,14 @@ def main():
     print(f"Tested {len(comparison_df)} different prior weights")
     print(f"Best mean confidence: {comparison_df['mean_confidence'].max():.3f}")
     print(f"Best high-confidence count: {comparison_df['high_confidence_count'].max()}")
+    # NEW: Print best accuracy if available
+    if 'accuracy' in comparison_df.columns and comparison_df['accuracy'].notnull().any():
+        best_acc_idx = comparison_df['accuracy'].idxmax()
+        best_acc_weight = comparison_df.loc[best_acc_idx, 'prior_weight']
+        best_acc_score = comparison_df.loc[best_acc_idx, 'accuracy']
+        print(f"Best accuracy: {best_acc_score:.4f} at prior weight {best_acc_weight}")
+    else:
+        print("No accuracy calculated (no ground truth labels).")
     print(f"\nResults saved to: {output_dir}")
     
     logger.info("Prior weight comparison completed!")

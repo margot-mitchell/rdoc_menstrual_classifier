@@ -6,7 +6,7 @@ simulation:
   n_subjects: 100
   n_hormone_samples: 70
   n_period_days: 150
-  random_seed: 44
+  random_seed: 22
 
 # Phase durations (days) from https://osf.io/preprints/psyarxiv/kzvce_v1 (Doornweerd et al. 2025)
 # Original proportions maintained but scaled to achieve subject's reported cycle_length

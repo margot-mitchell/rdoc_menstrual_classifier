@@ -602,13 +602,22 @@ class RuleBasedPrior:
         for i, predicted_phase in enumerate(phase_predictions):
             if predicted_phase in phases:
                 phase_idx = phases.index(predicted_phase)
-                # High confidence for rule-based prediction (0.8)
-                probabilities[i, phase_idx] = 0.8
-                # Distribute remaining probability evenly among other phases
-                remaining_prob = 0.2 / (n_phases - 1)
-                for j in range(n_phases):
-                    if j != phase_idx:
-                        probabilities[i, j] = remaining_prob
+                
+                if predicted_phase == 'perimenstruation':
+                    # Hard probabilities for perimenstruation (1.0 for predicted, 0.0 for others)
+                    probabilities[i, phase_idx] = 1.0
+                    # All other phases get 0.0 probability
+                    for j in range(n_phases):
+                        if j != phase_idx:
+                            probabilities[i, j] = 0.0
+                else:
+                    # Soft probabilities for other phases (0.8 for predicted, 0.2 distributed)
+                    probabilities[i, phase_idx] = 0.8
+                    # Distribute remaining probability evenly among other phases
+                    remaining_prob = 0.2 / (n_phases - 1)
+                    for j in range(n_phases):
+                        if j != phase_idx:
+                            probabilities[i, j] = remaining_prob
             else:
                 # If prediction is unknown, use uniform distribution
                 probabilities[i, :] = 1.0 / n_phases
